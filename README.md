@@ -123,7 +123,7 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 
 ## License
 
-MIT License. See `LICENSE`.
+MIT License. See `LICENSE`.  
 THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
 ## LLM Notice
