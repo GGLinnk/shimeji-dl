@@ -1,68 +1,120 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlsplit
 
-WINDOWS_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-}
+IMAGE_SUFFIXES = {".png", ".gif", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
-def title_from_slug(slug: str) -> tuple[str, str | None]:
-    raw = slug
-    if raw.startswith("undertale-"):
-        raw = raw[len("undertale-"):]
-    parts = raw.split("-by-", 1)
-    name = " ".join(word.capitalize() for word in parts[0].split("-") if word)
-    artist = None
-    if len(parts) == 2:
-        artist = " ".join(word.capitalize() for word in parts[1].split("-") if word)
-    return name or slug, artist
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(path.name + ".part")
+    part.write_bytes(data)
+    os.replace(part, path)
 
 
-def safe_folder_name(value: str, *, fallback: str = "shimeji") -> str:
-    value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", value).strip().rstrip(".")
-    value = re.sub(r"\s+", " ", value)
-    if not value:
-        value = fallback
-    if value.upper() in WINDOWS_RESERVED:
-        value = f"_{value}"
-    return value[:180]
+def atomic_write_json(path: Path, value: object) -> None:
+    payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=False).encode("utf-8") + b"\n"
+    atomic_write(path, payload)
 
 
-def character_folder_name(slug: str, name: str | None, artist: str | None) -> str:
-    guessed_name, guessed_artist = title_from_slug(slug)
-    base = (name or guessed_name).strip()
-    creator = (artist or guessed_artist or "").strip()
-    if creator and creator.casefold() not in base.casefold():
-        base = f"{base} - {creator}"
-    return safe_folder_name(base, fallback=slug)
+def normalize_asset_ref(value: str) -> tuple[str, str | None] | None:
+    """Return a safe local POSIX path and optional absolute source URL."""
+    raw = value.strip()
+    if not raw:
+        return None
+
+    parsed = urlsplit(raw)
+    absolute_url: str | None = None
+    if parsed.scheme:
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        absolute_url = raw
+        candidate = unquote(parsed.path)
+        # Absolute URLs are uncommon in Shimeji XML. Keep only the file name
+        # rather than mirroring a remote site's entire path locally.
+        candidate = PurePosixPath(candidate).name
+    else:
+        candidate = unquote(raw.split("?", 1)[0].split("#", 1)[0])
+
+    candidate = candidate.replace("\\", "/").lstrip("/")
+    while candidate.startswith("./"):
+        candidate = candidate[2:]
+    if candidate.lower().startswith("img/"):
+        candidate = candidate[4:]
+
+    path = PurePosixPath(candidate)
+    if not candidate or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    if ":" in path.parts[0]:
+        return None
+    if path.suffix.lower() not in IMAGE_SUFFIXES:
+        return None
+
+    return path.as_posix(), absolute_url
 
 
-def sanitize_asset_path(value: str) -> str:
-    """Convert an XML Image path into a safe relative POSIX path."""
-    value = value.strip().replace("\\", "/")
-    if not value:
-        raise ValueError("empty asset path")
-
-    parsed = urlparse(value)
-    if parsed.scheme or parsed.netloc:
-        raise ValueError("absolute URLs are not accepted as asset paths")
-
-    value = value.split("?", 1)[0].split("#", 1)[0].lstrip("/")
-    parts = [p for p in PurePosixPath(value).parts if p not in ("", ".")]
-    if not parts or any(p == ".." for p in parts):
-        raise ValueError("unsafe asset path")
-    return "/".join(parts)
+def quote_asset_path(path: str) -> str:
+    return "/".join(quote(part, safe="") for part in PurePosixPath(path).parts)
 
 
-def encoded_asset_path(relative_path: str) -> str:
-    return "/".join(quote(part, safe="") for part in PurePosixPath(relative_path).parts)
+def looks_like_image(data: bytes, path: str, content_type: str | None = None) -> bool:
+    if not data:
+        return False
+
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix == ".png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix == ".gif":
+        return data.startswith((b"GIF87a", b"GIF89a"))
+    if suffix in {".jpg", ".jpeg"}:
+        return data.startswith(b"\xff\xd8\xff")
+    if suffix == ".webp":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    if suffix == ".bmp":
+        return data.startswith(b"BM")
+
+    return bool(content_type and content_type.lower().startswith("image/"))
 
 
-def path_for_asset(root: Path, relative_path: str) -> Path:
-    parts = PurePosixPath(relative_path).parts
-    return root.joinpath(*parts)
+def is_valid_local_image(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    return looks_like_image(data, path.name)
+
+
+def compress_numbers(values: list[int]) -> list[str]:
+    if not values:
+        return []
+    nums = sorted(set(values))
+    ranges: list[str] = []
+    start = previous = nums[0]
+    for number in nums[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = number
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ranges
+
+
+def collect_images(root: Path) -> list[str]:
+    result: list[str] = []
+    if not root.exists():
+        return result
+    for path in root.rglob("*"):
+        if not path.is_file() or "conf" in path.relative_to(root).parts:
+            continue
+        if path.suffix.lower() in IMAGE_SUFFIXES and is_valid_local_image(path):
+            result.append(path.relative_to(root).as_posix())
+    return sorted(result, key=natural_key)
+
+
+def natural_key(value: str) -> list[object]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", value)]

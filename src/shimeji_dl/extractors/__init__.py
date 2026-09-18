@@ -1,3 +1,5 @@
 from .shimejis_xyz import ShimejisXYZExtractor
 
-__all__ = ["ShimejisXYZExtractor"]
+EXTRACTORS = (ShimejisXYZExtractor,)
+
+__all__ = ["EXTRACTORS", "ShimejisXYZExtractor"]

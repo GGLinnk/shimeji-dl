@@ -1,17 +1,11 @@
-from shimeji_dl.extractors.shimejis_xyz import ShimejisXYZExtractor
+from shimeji_dl.extractors.shimejis_xyz import extract_slugs_from_html
 
 
-def test_parse_pack_html():
+def test_pack_link_extraction_is_ordered_and_deduplicated() -> None:
     html = '''
-    <a href="/directory/shimeji/undertale-sans">Sans</a>
-    <a href="/directory/shimeji/undertale-nightmare-sans-by-niuniu-nuko">Nightmare Sans</a>
-    <a href="/directory/shimeji/undertale-sans">duplicate</a>
+    <a href="/directory/shimeji/undertale-napstablook">Napstablook</a>
+    <a href="https://shimejis.xyz/directory/shimeji/undertale-asriel">Asriel</a>
+    <a href="/directory/shimeji/undertale-napstablook">duplicate</a>
+    <a href="/directory/other">ignore</a>
     '''
-    chars = ShimejisXYZExtractor.parse_pack_html(
-        html, pack_url="https://shimejis.xyz/directory/undertale-shimeji-pack"
-    )
-    assert [c.slug for c in chars] == [
-        "undertale-sans",
-        "undertale-nightmare-sans-by-niuniu-nuko",
-    ]
-    assert chars[1].artist == "Niuniu Nuko"
+    assert extract_slugs_from_html(html) == ["undertale-napstablook", "undertale-asriel"]

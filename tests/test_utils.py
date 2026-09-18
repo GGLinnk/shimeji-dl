@@ -1,16 +1,9 @@
-import pytest
-
-from shimeji_dl.utils import sanitize_asset_path, title_from_slug
+from shimeji_dl.utils import compress_numbers, normalize_asset_ref
 
 
-def test_slug_title():
-    assert title_from_slug("undertale-nightmare-sans-by-niuniu-nuko") == (
-        "Nightmare Sans",
-        "Niuniu Nuko",
-    )
+def test_compress_numbers() -> None:
+    assert compress_numbers([1, 2, 3, 5, 8, 9]) == ["1-3", "5", "8-9"]
 
 
-def test_asset_paths():
-    assert sanitize_asset_path("/foo/bar.png") == "foo/bar.png"
-    with pytest.raises(ValueError):
-        sanitize_asset_path("../evil.png")
+def test_normalize_img_prefix() -> None:
+    assert normalize_asset_ref("/img/foo/shime1.png") == ("foo/shime1.png", None)

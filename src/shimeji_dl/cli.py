@@ -2,203 +2,143 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
-from pathlib import Path
-from dataclasses import asdict
+import shutil
 import sys
-
-from rich.console import Console
-from rich.table import Table
+from pathlib import Path
 
 from . import __version__
-from .downloader import CharacterDownloader
-from .errors import ShimejiDLError
-from .extractors import ShimejisXYZExtractor
-from .http import AsyncHTTP
-from .models import Character, CharacterReport
-from .utils import character_folder_name, safe_folder_name
+from .client import AsyncFetcher, FetchError
+from .downloader import DownloadOptions, Downloader
+from .extractors import EXTRACTORS
+from .models import CharacterRef
 
-console = Console(stderr=True)
+DEFAULT_USER_AGENT = f"shimeji-dl/{__version__} (+https://shimejis.xyz/)"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="shimeji-dl",
-        description="Async downloader for shimejis.xyz, with VShimeji-compatible output.",
+        description="Async Shimeji downloader with extractor-style URL handling.",
     )
+    parser.add_argument("targets", nargs="+", help="pack URL, character URL, or shimejis.xyz slug")
+    parser.add_argument("-o", "--output", type=Path, default=Path("shimeji-downloads"))
+    parser.add_argument("-j", "--jobs", type=_positive_int, default=5, help="characters downloaded concurrently (default: 5)")
+    parser.add_argument("--connections", type=_positive_int, default=20, help="maximum concurrent HTTP requests (default: 20)")
+    parser.add_argument("--timeout", type=_positive_float, default=20.0, help="HTTP timeout in seconds (default: 20)")
+    parser.add_argument("--retries", type=_non_negative_int, default=3, help="HTTP retries (default: 3)")
     parser.add_argument(
-        "inputs",
-        nargs="+",
-        help="Pack URL, character URL, or shimejis.xyz character slug.",
+        "--probe",
+        choices=("auto", "off", "deep"),
+        default="auto",
+        help="numeric discovery: auto (default), off, or deeper sparse-tail exploration",
     )
-    out = parser.add_mutually_exclusive_group()
-    out.add_argument("-o", "--output", type=Path, default=Path("shimeji-downloads"))
-    out.add_argument(
-        "--vshimeji",
-        type=Path,
-        help="VShimeji root directory. Characters are written under <path>/img/.",
-    )
-    parser.add_argument("-j", "--jobs", type=int, default=4, help="Characters processed concurrently.")
-    parser.add_argument(
-        "--concurrency",
-        type=int,
-        default=12,
-        help="Maximum concurrent HTTP requests across all characters.",
-    )
-    parser.add_argument("--timeout", type=float, default=20.0)
-    parser.add_argument("--retries", type=int, default=3)
-    parser.add_argument(
-        "--probe-max",
-        type=int,
-        default=128,
-        help="When XML is unavailable, exhaustively try shime1.png..shimeN.png (default: 128).",
-    )
-    parser.add_argument(
-        "--scan-extras",
-        action="store_true",
-        help="Even when actions.xml exists, also probe shime1.png..shimeN.png for unused extras.",
-    )
-    parser.add_argument("--no-config", action="store_true", help="Do not try actions/behaviors XML.")
-    parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--list-only",
-        action="store_true",
-        help="Extract inputs and print characters without downloading.",
-    )
-    parser.add_argument("--json", action="store_true", help="Print machine-readable result JSON.")
+    parser.add_argument("--no-probe", action="store_true", help="deprecated alias for --probe off")
+    parser.add_argument("--force", action="store_true", help="redownload existing files")
+    parser.add_argument("--strict", action="store_true", help="exit non-zero if a character is unusable or an XML-referenced image is missing")
+    parser.add_argument("--no-metadata", action="store_true", help="do not write metadata.json")
+    parser.add_argument("--archive", action="store_true", help="create <output>.zip after downloading")
+    parser.add_argument("-v", "--verbose", action="store_true", help="show adaptive-probe details and attempted URLs")
+    parser.add_argument("-q", "--quiet", action="store_true", help="only print fatal errors and final summary")
+    parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
 
-def _dedupe(chars: list[Character]) -> list[Character]:
-    result: list[Character] = []
-    seen: set[str] = set()
-    for char in chars:
-        if char.slug not in seen:
-            seen.add(char.slug)
-            result.append(char)
-    return result
+def main() -> None:
+    args = build_parser().parse_args()
+    try:
+        exit_code = asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        print("Interrupted.", file=sys.stderr)
+        raise SystemExit(130) from None
+    raise SystemExit(exit_code)
 
 
-def _allocate_destinations(chars: list[Character], root: Path) -> dict[str, Path]:
-    used: set[str] = set()
-    result: dict[str, Path] = {}
-    for char in chars:
-        base = character_folder_name(char.slug, char.name, char.artist)
-        name = base
-        if name.casefold() in used:
-            name = safe_folder_name(f"{base} [{char.slug}]")
-        used.add(name.casefold())
-        result[char.slug] = root / name
-    return result
-
-
-async def async_main(args: argparse.Namespace) -> int:
-    if args.jobs < 1 or args.concurrency < 1 or args.probe_max < 1:
-        raise ShimejiDLError("--jobs, --concurrency and --probe-max must be >= 1")
-
-    output_root = (args.vshimeji / "img") if args.vshimeji else args.output
-
-    async with AsyncHTTP(
-        concurrency=args.concurrency,
+async def _run(args: argparse.Namespace) -> int:
+    probe_mode = "off" if args.no_probe else args.probe
+    async with AsyncFetcher(
+        connections=args.connections,
         timeout=args.timeout,
         retries=args.retries,
-    ) as http:
-        extractor = ShimejisXYZExtractor(http)
-        chars: list[Character] = []
-        for value in args.inputs:
-            console.print(f"[cyan]extractor:[/cyan] {value}", highlight=False)
-            chars.extend(await extractor.extract(value))
-        chars = _dedupe(chars)
+        user_agent=args.user_agent,
+    ) as fetcher:
+        try:
+            characters = await _extract_targets(fetcher, args.targets, quiet=args.quiet)
+        except (ValueError, FetchError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
-        if args.list_only:
-            if args.json:
-                print(json.dumps([asdict(char) for char in chars], ensure_ascii=False, indent=2))
-            else:
-                table = Table(title=f"{len(chars)} character(s)")
-                table.add_column("Slug")
-                table.add_column("Name")
-                table.add_column("Artist")
-                for char in chars:
-                    table.add_row(char.slug, char.name or "", char.artist or "")
-                console.print(table)
-            return 0
-
-        destinations = _allocate_destinations(chars, output_root)
-        downloader = CharacterDownloader(
-            http,
-            extractor,
-            overwrite=args.overwrite,
-            probe_max=args.probe_max,
-            scan_extras=args.scan_extras,
-            no_config=args.no_config,
-            dry_run=args.dry_run,
+        options = DownloadOptions(
+            output=args.output,
+            jobs=args.jobs,
+            probe_mode=probe_mode,
+            force=args.force,
+            metadata=not args.no_metadata,
+            strict=args.strict,
+            verbose=args.verbose,
+            quiet=args.quiet,
         )
+        downloader = Downloader(fetcher, options)
+        results = await downloader.download_all(characters)
 
-        job_sem = asyncio.Semaphore(args.jobs)
+    usable = sum(result.usable for result in results)
+    strict_failures = sum(not result.strict_ok for result in results)
+    print(f"Finished: {usable}/{len(results)} usable character(s). Output: {args.output}", flush=True)
 
-        async def run_one(char: Character) -> CharacterReport:
-            async with job_sem:
-                console.print(f"[blue]download:[/blue] {char.slug}", highlight=False)
-                return await downloader.download(char, destinations[char.slug])
+    if args.archive:
+        archive = await asyncio.to_thread(_make_archive, args.output)
+        print(f"Archive: {archive}", flush=True)
 
-        tasks = [asyncio.create_task(run_one(char)) for char in chars]
-        reports: list[CharacterReport] = []
-        for task in asyncio.as_completed(tasks):
-            report = await task
-            reports.append(report)
-            sprite_count = sum(1 for f in report.files if not f.relative_path.startswith("conf/"))
-            if report.error:
-                console.print(f"[red]error:[/red] {report.character.slug}: {report.error}", highlight=False)
-            else:
-                mode = report.discovery_mode or "?"
-                console.print(
-                    f"[green]done:[/green] {report.character.slug}: {sprite_count} sprite(s), {mode}",
-                    highlight=False,
-                )
-                for warning in report.warnings:
-                    console.print(f"  [yellow]warning:[/yellow] {warning}", highlight=False)
-
-        reports.sort(key=lambda r: r.character.slug)
-        if args.json:
-            payload = []
-            for r in reports:
-                payload.append(
-                    {
-                        "slug": r.character.slug,
-                        "name": r.character.name,
-                        "artist": r.character.artist,
-                        "destination": str(r.destination),
-                        "ok": r.ok,
-                        "sprite_base": r.sprite_base,
-                        "discovery_mode": r.discovery_mode,
-                        "xml_images": r.xml_images,
-                        "missing": r.missing,
-                        "warnings": r.warnings,
-                        "error": r.error,
-                    }
-                )
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-
-        failed = sum(1 for r in reports if not r.ok)
-        console.print(
-            f"[bold]Finished:[/bold] {len(reports) - failed}/{len(reports)} usable character(s). "
-            f"Output: {output_root}",
-            highlight=False,
-        )
-        return 1 if failed else 0
+    if args.strict and strict_failures:
+        return 1
+    return 0 if usable == len(results) else 1
 
 
-def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-    try:
-        code = asyncio.run(async_main(args))
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted.[/yellow]")
-        code = 130
-    except ShimejiDLError as exc:
-        console.print(f"[red]error:[/red] {exc}", highlight=False)
-        code = 2
-    sys.exit(code)
+async def _extract_targets(fetcher: AsyncFetcher, targets: list[str], *, quiet: bool) -> list[CharacterRef]:
+    async def extract_one(target: str) -> list[CharacterRef]:
+        extractor_cls = next((candidate for candidate in EXTRACTORS if candidate.suitable(target)), None)
+        if extractor_cls is None:
+            raise ValueError(f"no extractor supports: {target}")
+        if not quiet:
+            print(f"extractor[{extractor_cls.key}]: {target}", flush=True)
+        return await extractor_cls().extract(fetcher, target)
+
+    groups = await asyncio.gather(*(extract_one(target) for target in targets))
+    unique: list[CharacterRef] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        for character in group:
+            key = (character.extractor, character.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(character)
+    return unique
+
+
+def _make_archive(output: Path) -> Path:
+    resolved = output.resolve()
+    archive_base = resolved.parent / resolved.name
+    archive_path = Path(shutil.make_archive(str(archive_base), "zip", root_dir=resolved.parent, base_dir=resolved.name))
+    return archive_path
+
+
+def _positive_int(value: str) -> int:
+    integer = int(value)
+    if integer <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return integer
+
+
+def _non_negative_int(value: str) -> int:
+    integer = int(value)
+    if integer < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return integer
+
+
+def _positive_float(value: str) -> float:
+    number = float(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return number
