@@ -8,9 +8,17 @@ from pathlib import Path
 from ..version import get_version
 from .http import HttpClient
 from .interfaces import ConfigFormat, Reporter, SourceAdapter
-from .models import AssetRef, CharacterRef, CharacterResult, ConfigResource, MissingAsset
+from .models import AssetRef, CharacterRef, CharacterResult, ConfigResource, MissingAsset, ProbeReport
 from .probing import AdaptiveNumericProber, numeric_indices
-from .storage import atomic_write, atomic_write_json, collect_images, compress_numbers, is_valid_local_image, looks_like_image, natural_key
+from .storage import (
+    atomic_write,
+    atomic_write_json,
+    collect_images,
+    compress_numbers,
+    is_valid_local_image,
+    looks_like_image,
+    natural_key,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +26,7 @@ class DownloadOptions:
     output: Path
     jobs: int = 5
     probe_mode: str = "auto"
-    force: bool = False
+    overwrite: bool = False
     metadata: bool = True
     strict: bool = False
 
@@ -50,7 +58,22 @@ class DownloadEngine:
 
     async def _limited_download(self, character: CharacterRef) -> CharacterResult:
         async with self._character_semaphore:
-            return await self.download_character(character)
+            try:
+                return await self.download_character(character)
+            except Exception as exc:
+                result = CharacterResult(
+                    character=character,
+                    output_dir=str(self.options.output / character.id),
+                    asset_paths=collect_images(self.options.output / character.id),
+                    discovery="error",
+                    configs={},
+                    referenced_missing=[],
+                    probe=ProbeReport(mode=self.options.probe_mode, stop_reason="error"),
+                    usable=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                self.reporter.character_finished(result)
+                return result
 
     async def download_character(self, character: CharacterRef) -> CharacterResult:
         source = self.sources[character.source]
@@ -83,8 +106,9 @@ class DownloadEngine:
         probe = await self._probe(source, character, dest, {ref.path for ref in refs}, referenced_present)
 
         asset_paths = collect_images(dest)
+        referenced_paths = {ref.path for ref in refs}
         probe.extra_hits = sorted(
-            {f"shime{index}.png" for index in probe.hits if f"shime{index}.png" not in {ref.path for ref in refs}},
+            {f"shime{index}.png" for index in probe.hits if f"shime{index}.png" not in referenced_paths},
             key=natural_key,
         )
         if refs and probe.mode != "off":
@@ -120,7 +144,7 @@ class DownloadEngine:
         conf_dir: Path,
     ) -> ConfigResource | None:
         local_path = conf_dir / name
-        if local_path.exists() and not self.options.force:
+        if local_path.exists() and not self.options.overwrite:
             try:
                 data = await asyncio.to_thread(local_path.read_bytes)
             except OSError:
@@ -150,7 +174,11 @@ class DownloadEngine:
         dest: Path,
     ) -> tuple[AssetRef, bool, list[str]]:
         local_path = dest.joinpath(*ref.path.split("/"))
-        if local_path.exists() and not self.options.force and await asyncio.to_thread(is_valid_local_image, local_path):
+        if (
+            local_path.exists()
+            and not self.options.overwrite
+            and await asyncio.to_thread(is_valid_local_image, local_path)
+        ):
             return ref, True, []
 
         tried: list[str] = []
@@ -170,7 +198,7 @@ class DownloadEngine:
         dest: Path,
         xml_paths: set[str],
         referenced_present: set[str],
-    ):
+    ) -> ProbeReport:
         anchors = numeric_indices(xml_paths)
         known = numeric_indices(collect_images(dest)) | numeric_indices(referenced_present)
 
@@ -191,13 +219,15 @@ class DownloadEngine:
             key=natural_key,
         )
         metadata = {
-            "schema_version": 3,
+            "schema_version": 4,
             "tool": {"name": "shimeji-dl", "version": get_version()},
             "source_adapter": result.character.source,
             "id": result.character.id,
             "source": result.character.source_url,
             "downloaded_at": datetime.now(timezone.utc).isoformat(),
             "usable": result.usable,
+            "complete": result.complete,
+            "error": result.error,
             "completeness": _completeness(result),
             "discovery": {
                 "mode": result.discovery,
@@ -259,6 +289,8 @@ def _config_metadata(config: ConfigResource | None) -> dict[str, object]:
 
 
 def _completeness(result: CharacterResult) -> str:
+    if result.error:
+        return "error"
     if result.referenced_missing:
         return "incomplete"
     if any(config and config.asset_refs for config in result.configs.values()):

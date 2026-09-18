@@ -62,7 +62,16 @@ class CharacterResult:
     referenced_missing: list[MissingAsset]
     probe: ProbeReport
     usable: bool
+    error: str | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.error is None and self.usable and not self.referenced_missing
+
+    @property
+    def failed(self) -> bool:
+        return not self.complete
 
     @property
     def strict_ok(self) -> bool:
-        return self.usable and not self.referenced_missing
+        return self.complete

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Iterable
 from urllib.parse import urljoin, urlsplit
@@ -11,9 +12,11 @@ from ...core.models import AssetRef, CharacterRef, ConfigResource
 from ...core.storage import quote_asset_path
 
 SITE = "https://shimejis.xyz"
+DIRECTORY = f"{SITE}/directory"
 CHARACTER_PREFIX = "/directory/shimeji/"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ASSET_HOSTS = ("https://sprites.shimejis.xyz", "https://sprite.shimejis.xyz")
+WHOLE_SITE_TARGETS = {"shimejis.xyz", "www.shimejis.xyz"}
 
 
 class ShimejisXYZSource:
@@ -25,13 +28,24 @@ class ShimejisXYZSource:
 
     @classmethod
     def suitable(cls, target: str) -> bool:
-        if "://" not in target:
-            return bool(SLUG_RE.fullmatch(target.strip().lower()))
-        parsed = urlsplit(target)
-        return parsed.scheme in {"http", "https"} and parsed.hostname in {"shimejis.xyz", "www.shimejis.xyz"}
+        normalized = target.strip().lower().rstrip("/")
+        if normalized in WHOLE_SITE_TARGETS:
+            return True
+        if "://" not in normalized:
+            return bool(SLUG_RE.fullmatch(normalized))
+        parsed = urlsplit(normalized)
+        return parsed.scheme in {"http", "https"} and parsed.hostname in WHOLE_SITE_TARGETS
+
+    def confirmation_message(self, target: str) -> str | None:
+        if _is_whole_site_target(target):
+            return "This target covers the entire shimejis.xyz directory and may download many characters. Continue?"
+        return None
 
     async def extract(self, client: HttpClient, target: str) -> list[CharacterRef]:
         normalized = target.strip()
+        if _is_whole_site_target(normalized):
+            return await self._extract_site(client)
+
         if "://" not in normalized:
             slug = normalized.lower()
             if slug.endswith("-shimeji-pack"):
@@ -53,9 +67,7 @@ class ShimejisXYZSource:
         return {"Referer": f"{SITE}/"}
 
     def config_candidates(self, character: CharacterRef, name: str) -> list[str]:
-        return [
-            f"{root}/{name}" for root in self._roots(character)
-        ] + [
+        return [f"{root}/{name}" for root in self._roots(character)] + [
             f"{root}/conf/{name}" for root in self._roots(character)
         ]
 
@@ -79,6 +91,14 @@ class ShimejisXYZSource:
                 preferred.append(origin)
         preferred.extend(host for host in ASSET_HOSTS if host not in preferred)
         self._preferred_hosts[character.id] = tuple(preferred)
+
+    async def _extract_site(self, client: HttpClient) -> list[CharacterRef]:
+        page = await client.get_text(DIRECTORY, headers=self.request_headers())
+        packs = extract_pack_urls_from_html(page)
+        if not packs:
+            raise ValueError(f"no packs found in directory: {DIRECTORY}")
+        groups = await asyncio.gather(*(self._extract_pack(client, url) for url in packs))
+        return _unique_characters(character for group in groups for character in group)
 
     async def _extract_pack(self, client: HttpClient, url: str) -> list[CharacterRef]:
         page = await client.get_text(url, headers=self.request_headers())
@@ -114,6 +134,48 @@ def extract_slugs_from_html(document: str) -> list[str]:
         seen.add(slug)
         slugs.append(slug)
     return slugs
+
+
+def extract_pack_urls_from_html(document: str) -> list[str]:
+    tree = html.fromstring(document)
+    urls: list[str] = []
+    seen: set[str] = set()
+    for href in tree.xpath("//a/@href"):
+        absolute = urljoin(SITE, str(href))
+        parsed = urlsplit(absolute)
+        path = parsed.path.rstrip("/")
+        if parsed.hostname not in WHOLE_SITE_TARGETS:
+            continue
+        if not path.startswith("/directory/") or path.startswith(CHARACTER_PREFIX) or path.count("/") != 2:
+            continue
+        url = f"{SITE}{path}"
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _is_whole_site_target(target: str) -> bool:
+    normalized = target.strip().lower().rstrip("/")
+    if normalized in WHOLE_SITE_TARGETS:
+        return True
+    if "://" not in normalized:
+        return False
+    parsed = urlsplit(normalized)
+    return parsed.scheme in {"http", "https"} and parsed.hostname in WHOLE_SITE_TARGETS and parsed.path.rstrip("/") in {"", "/directory"}
+
+
+def _unique_characters(characters: Iterable[CharacterRef]) -> list[CharacterRef]:
+    unique: list[CharacterRef] = []
+    seen: set[tuple[str, str]] = set()
+    for character in characters:
+        key = (character.source, character.id)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(character)
+    return unique
 
 
 def _origin(url: str) -> str:
