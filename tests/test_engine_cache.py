@@ -91,3 +91,49 @@ def test_overwrite_refetches_existing_valid_asset(tmp_path: Path) -> None:
     assert tried == ["https://example/shime1.png"]
     assert client.calls == 1
     assert (destination / "shime1.png").read_bytes() == PNG_B
+
+class ProbeSource(Source):
+    def numeric_asset(self, character, index):
+        return AssetRef(f"shime{index}.png", f"shime{index}.png")
+
+    def asset_candidates(self, character, ref):
+        return [f"https://example/{ref.path}"]
+
+
+class MissingClient:
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    async def get(self, url, *args, **kwargs):
+        self.urls.append(url)
+        return None
+
+
+def test_probe_reuses_hits_but_rechecks_misses_on_every_scan(tmp_path: Path) -> None:
+    character = CharacterRef("source", "character", "https://example/character")
+    destination = tmp_path / character.id
+    destination.mkdir()
+    (destination / "shime1.png").write_bytes(PNG_A)
+    client = MissingClient()
+    source = ProbeSource()
+    engine = DownloadEngine(
+        client,
+        DownloadOptions(output=tmp_path, overwrite=False),
+        sources={"source": source},
+        config_format=Config(),
+        reporter=Reporter(),
+    )
+
+    first = asyncio.run(engine._probe(source, character, destination, set(), set()))
+    first_urls = list(client.urls)
+    client.urls.clear()
+    second = asyncio.run(engine._probe(source, character, destination, set(), set()))
+    second_urls = list(client.urls)
+
+    assert first.requests > 0
+    assert second.requests == first.requests
+    assert first_urls == second_urls
+    assert "https://example/shime1.png" not in first_urls
+    assert "https://example/shime1.png" not in second_urls
+    assert "https://example/shime2.png" in first_urls
+    assert "https://example/shime2.png" in second_urls
