@@ -1,144 +1,135 @@
 from __future__ import annotations
 
-import argparse
 import asyncio
 import shutil
-import sys
+from enum import Enum
 from pathlib import Path
+from typing import Annotated
 
-from . import __version__
-from .client import AsyncFetcher, FetchError
-from .downloader import DownloadOptions, Downloader
-from .extractors import EXTRACTORS
-from .models import CharacterRef
+import typer
 
-DEFAULT_USER_AGENT = f"shimeji-dl/{__version__} (+https://shimejis.xyz/)"
+from .core.engine import DownloadEngine, DownloadOptions
+from .core.http import HttpClient, HttpError
+from .formats.shimeji_xml import ShimejiXmlFormat
+from .sources import default_sources
+from .ui import RichReporter
+from .version import get_version
 
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="shimeji-dl",
-        description="Async Shimeji downloader with extractor-style URL handling.",
-    )
-    parser.add_argument("targets", nargs="+", help="pack URL, character URL, or shimejis.xyz slug")
-    parser.add_argument("-o", "--output", type=Path, default=Path("shimeji-downloads"))
-    parser.add_argument("-j", "--jobs", type=_positive_int, default=5, help="characters downloaded concurrently (default: 5)")
-    parser.add_argument("--connections", type=_positive_int, default=20, help="maximum concurrent HTTP requests (default: 20)")
-    parser.add_argument("--timeout", type=_positive_float, default=20.0, help="HTTP timeout in seconds (default: 20)")
-    parser.add_argument("--retries", type=_non_negative_int, default=3, help="HTTP retries (default: 3)")
-    parser.add_argument(
-        "--probe",
-        choices=("auto", "off", "deep"),
-        default="auto",
-        help="numeric discovery: auto (default), off, or deeper sparse-tail exploration",
-    )
-    parser.add_argument("--no-probe", action="store_true", help="deprecated alias for --probe off")
-    parser.add_argument("--force", action="store_true", help="redownload existing files")
-    parser.add_argument("--strict", action="store_true", help="exit non-zero if a character is unusable or an XML-referenced image is missing")
-    parser.add_argument("--no-metadata", action="store_true", help="do not write metadata.json")
-    parser.add_argument("--archive", action="store_true", help="create <output>.zip after downloading")
-    parser.add_argument("-v", "--verbose", action="store_true", help="show adaptive-probe details and attempted URLs")
-    parser.add_argument("-q", "--quiet", action="store_true", help="only print fatal errors and final summary")
-    parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    return parser
+app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode="rich")
 
 
-def main() -> None:
-    args = build_parser().parse_args()
-    try:
-        exit_code = asyncio.run(_run(args))
-    except KeyboardInterrupt:
-        print("Interrupted.", file=sys.stderr)
-        raise SystemExit(130) from None
-    raise SystemExit(exit_code)
+class ProbeMode(str, Enum):
+    AUTO = "auto"
+    OFF = "off"
+    DEEP = "deep"
 
 
-async def _run(args: argparse.Namespace) -> int:
-    probe_mode = "off" if args.no_probe else args.probe
-    async with AsyncFetcher(
-        connections=args.connections,
-        timeout=args.timeout,
-        retries=args.retries,
-        user_agent=args.user_agent,
-    ) as fetcher:
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"shimeji-dl {get_version()}")
+        raise typer.Exit()
+
+
+@app.command()
+def download(
+    targets: Annotated[list[str], typer.Argument(help="Pack URL, character URL, or supported source identifier.")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="Output directory.")] = Path("shimeji-downloads"),
+    jobs: Annotated[int, typer.Option("--jobs", "-j", min=1, help="Characters downloaded concurrently.")] = 5,
+    connections: Annotated[int, typer.Option(min=1, help="Maximum concurrent HTTP requests.")] = 20,
+    timeout: Annotated[float, typer.Option(min=0.1, help="HTTP timeout in seconds.")] = 20.0,
+    retries: Annotated[int, typer.Option(min=0, help="HTTP retries handled by Tenacity.")] = 3,
+    probe: Annotated[ProbeMode, typer.Option(help="Adaptive numeric discovery mode.")] = ProbeMode.AUTO,
+    force: Annotated[bool, typer.Option(help="Redownload existing files.")] = False,
+    strict: Annotated[bool, typer.Option(help="Fail if a character is unusable or an XML-referenced asset is missing.")] = False,
+    metadata: Annotated[bool, typer.Option("--metadata/--no-metadata", help="Write metadata.json.")] = True,
+    archive: Annotated[bool, typer.Option(help="Create <output>.zip after downloading.")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show probe and URL details.")] = False,
+    quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Suppress progress output.")] = False,
+    version: Annotated[bool | None, typer.Option("--version", callback=_version_callback, is_eager=True)] = None,
+) -> None:
+    raise typer.Exit(asyncio.run(_run(
+        targets=targets,
+        output=output,
+        jobs=jobs,
+        connections=connections,
+        timeout=timeout,
+        retries=retries,
+        probe=probe.value,
+        force=force,
+        strict=strict,
+        metadata=metadata,
+        archive=archive,
+        verbose=verbose,
+        quiet=quiet,
+    )))
+
+
+async def _run(**options: object) -> int:
+    reporter = RichReporter(quiet=bool(options["quiet"]), verbose=bool(options["verbose"]))
+    sources = default_sources()
+    user_agent = f"shimeji-dl/{get_version()}"
+
+    async with HttpClient(
+        connections=int(options["connections"]),
+        timeout=float(options["timeout"]),
+        retries=int(options["retries"]),
+        user_agent=user_agent,
+    ) as client:
         try:
-            characters = await _extract_targets(fetcher, args.targets, quiet=args.quiet)
-        except (ValueError, FetchError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            characters = await _extract_targets(client, sources, list(options["targets"]), reporter)
+        except (ValueError, HttpError) as exc:
+            reporter.fatal(str(exc))
             return 2
 
-        options = DownloadOptions(
-            output=args.output,
-            jobs=args.jobs,
-            probe_mode=probe_mode,
-            force=args.force,
-            metadata=not args.no_metadata,
-            strict=args.strict,
-            verbose=args.verbose,
-            quiet=args.quiet,
+        engine = DownloadEngine(
+            client,
+            DownloadOptions(
+                output=Path(options["output"]),
+                jobs=int(options["jobs"]),
+                probe_mode=str(options["probe"]),
+                force=bool(options["force"]),
+                metadata=bool(options["metadata"]),
+                strict=bool(options["strict"]),
+            ),
+            sources=sources,
+            config_format=ShimejiXmlFormat(),
+            reporter=reporter,
         )
-        downloader = Downloader(fetcher, options)
-        results = await downloader.download_all(characters)
+        results = await engine.download_all(characters)
 
     usable = sum(result.usable for result in results)
     strict_failures = sum(not result.strict_ok for result in results)
-    print(f"Finished: {usable}/{len(results)} usable character(s). Output: {args.output}", flush=True)
+    reporter.info(f"Finished: {usable}/{len(results)} usable character(s). Output: {options['output']}")
 
-    if args.archive:
-        archive = await asyncio.to_thread(_make_archive, args.output)
-        print(f"Archive: {archive}", flush=True)
-
-    if args.strict and strict_failures:
+    if bool(options["archive"]):
+        archive_path = await asyncio.to_thread(_make_archive, Path(options["output"]))
+        reporter.info(f"Archive: {archive_path}")
+    if bool(options["strict"]) and strict_failures:
         return 1
     return 0 if usable == len(results) else 1
 
 
-async def _extract_targets(fetcher: AsyncFetcher, targets: list[str], *, quiet: bool) -> list[CharacterRef]:
-    async def extract_one(target: str) -> list[CharacterRef]:
-        extractor_cls = next((candidate for candidate in EXTRACTORS if candidate.suitable(target)), None)
-        if extractor_cls is None:
-            raise ValueError(f"no extractor supports: {target}")
-        if not quiet:
-            print(f"extractor[{extractor_cls.key}]: {target}", flush=True)
-        return await extractor_cls().extract(fetcher, target)
+async def _extract_targets(client: HttpClient, sources: dict[str, object], targets: list[str], reporter: RichReporter):
+    async def extract_one(target: str):
+        source = next((candidate for candidate in sources.values() if candidate.suitable(target)), None)
+        if source is None:
+            raise ValueError(f"no source supports: {target}")
+        reporter.extraction(source.key, target)
+        return await source.extract(client, target)
 
     groups = await asyncio.gather(*(extract_one(target) for target in targets))
-    unique: list[CharacterRef] = []
+    unique = []
     seen: set[tuple[str, str]] = set()
     for group in groups:
         for character in group:
-            key = (character.extractor, character.id)
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(character)
+            key = (character.source, character.id)
+            if key not in seen:
+                seen.add(key)
+                unique.append(character)
     return unique
 
 
 def _make_archive(output: Path) -> Path:
     resolved = output.resolve()
     archive_base = resolved.parent / resolved.name
-    archive_path = Path(shutil.make_archive(str(archive_base), "zip", root_dir=resolved.parent, base_dir=resolved.name))
-    return archive_path
-
-
-def _positive_int(value: str) -> int:
-    integer = int(value)
-    if integer <= 0:
-        raise argparse.ArgumentTypeError("must be > 0")
-    return integer
-
-
-def _non_negative_int(value: str) -> int:
-    integer = int(value)
-    if integer < 0:
-        raise argparse.ArgumentTypeError("must be >= 0")
-    return integer
-
-
-def _positive_float(value: str) -> float:
-    number = float(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError("must be > 0")
-    return number
+    return Path(shutil.make_archive(str(archive_base), "zip", root_dir=resolved.parent, base_dir=resolved.name))

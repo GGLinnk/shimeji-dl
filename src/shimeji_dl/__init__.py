@@ -1,3 +1,5 @@
-"""shimeji-dl."""
+"""shimeji-dl public package."""
 
-__version__ = "0.3.0"
+from .version import get_version
+
+__all__ = ["get_version"]

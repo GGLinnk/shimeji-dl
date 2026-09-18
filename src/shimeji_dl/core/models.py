@@ -5,14 +5,14 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True, slots=True)
 class CharacterRef:
-    extractor: str
+    source: str
     id: str
     source_url: str
     title: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class ImageRef:
+class AssetRef:
     value: str
     path: str
     absolute_url: str | None = None
@@ -24,7 +24,7 @@ class ConfigResource:
     data: bytes
     source_url: str | None
     cached: bool = False
-    image_refs: list[ImageRef] = field(default_factory=list)
+    asset_refs: list[AssetRef] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +37,7 @@ class MissingAsset:
 @dataclass(slots=True)
 class ProbeReport:
     mode: str
-    xml_anchors: list[int] = field(default_factory=list)
+    anchors: list[int] = field(default_factory=list)
     hits: list[int] = field(default_factory=list)
     extra_hits: list[str] = field(default_factory=list)
     misses: list[int] = field(default_factory=list)
@@ -56,10 +56,9 @@ class ProbeReport:
 class CharacterResult:
     character: CharacterRef
     output_dir: str
-    sprite_paths: list[str]
+    asset_paths: list[str]
     discovery: str
-    actions: ConfigResource | None
-    behaviors: ConfigResource | None
+    configs: dict[str, ConfigResource | None]
     referenced_missing: list[MissingAsset]
     probe: ProbeReport
     usable: bool
