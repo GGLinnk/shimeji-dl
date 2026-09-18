@@ -124,3 +124,8 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 ## License
 
 MIT License. See `LICENSE`.
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+
+## LLM Notice
+
+Large language models, including Codex and Claude Code, were used in the development of this project.
