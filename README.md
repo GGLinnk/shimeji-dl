@@ -1,18 +1,61 @@
 # shimeji-dl
 
-Asynchronous Shimeji downloader with pluggable source adapters, XML-driven asset discovery, and adaptive numeric probing.
+Asynchronous Shimeji downloader with pluggable source adapters, XML-driven asset discovery, adaptive numeric probing, persistent local reuse, and concurrent terminal progress.
 
 ## Install / run with uv
+
+From a checkout:
 
 ```bash
 uv run shimeji-dl https://shimejis.xyz/directory/undertale-shimeji-pack
 ```
 
+Once published as a package:
+
+```bash
+uvx shimeji-dl https://shimejis.xyz/directory/undertale-shimeji-pack
+```
+
+A character URL or slug is also accepted:
+
 ```bash
 uv run shimeji-dl https://shimejis.xyz/directory/shimeji/undertale-nightmare-sans-by-niuniu-nuko
+uv run shimeji-dl undertale-nightmare-sans-by-niuniu-nuko
 ```
 
 By default, output is written to `shimeji-downloads/`.
+
+## Existing downloads
+
+Existing valid configuration files and images are reused by default.  
+Re-running the same command therefore does not download files that are already present and valid.
+
+Use `--overwrite` to explicitly refresh and replace existing valid files:
+
+```bash
+uv run shimeji-dl https://shimejis.xyz/directory/undertale-shimeji-pack --overwrite
+```
+
+An internal retry never overwrites successful files from the preceding attempt.  
+It retries only failed characters and reuses everything that was already downloaded successfully.
+
+## Retry and confirmations
+
+When one or more characters fail, an interactive terminal offers to retry only those failed characters once.
+
+Use `--retry` to perform that retry automatically:
+
+```bash
+uv run shimeji-dl https://shimejis.xyz/directory/undertale-shimeji-pack --retry
+```
+
+`--yes` / `-y` answers yes to all confirmation prompts, including the retry prompt and potentially expensive target validations:
+
+```bash
+uv run shimeji-dl https://shimejis.xyz --yes
+```
+
+Downloading the entire `shimejis.xyz` directory requires confirmation unless `--yes` is supplied.
 
 ## Architecture
 
@@ -26,7 +69,7 @@ src/shimeji_dl/
 ├── sources/               # Remote source adapters
 │   └── shimejis_xyz/      # shimejis.xyz extraction and URL layout
 ├── ui/                    # Presentation implementations
-│   └── rich.py            # Rich progress/reporting
+│   └── rich.py            # Rich progress/reporting and confirmations
 ├── cli.py                 # Typer CLI composition root
 └── version.py             # Reads installed metadata; pyproject.toml is the SSOT
 ```
@@ -55,7 +98,7 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 - `httpx` - Async HTTP transport and connection pooling.
 - `tenacity` - Retry policy and exponential backoff.
 - `lxml` - HTML/XML parsing and XPath.
-- `rich` - Concurrent terminal progress and formatted reporting.
+- `rich` - Concurrent terminal progress, wrapping output and interactive confirmations.
 - `typer` - CLI declaration, validation, help and option parsing.
 
 ## Useful options
@@ -67,7 +110,9 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 --timeout FLOAT
 --retries INTEGER
 --probe auto|off|deep
---force
+--overwrite
+--retry
+-y, --yes
 --strict
 --metadata / --no-metadata
 --archive
