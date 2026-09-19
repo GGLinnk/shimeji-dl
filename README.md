@@ -23,11 +23,29 @@ uv run shimeji-dl https://shimejis.xyz/directory/shimeji/undertale-nightmare-san
 uv run shimeji-dl undertale-nightmare-sans-by-niuniu-nuko
 ```
 
-By default, output is written to `shimeji-downloads/`.
+By default, output is written using the native Shimeji-ee / VShimeji layout:
+
+```text
+shimeji-downloads/
+└── img/
+    └── <character>/
+        ├── shime*.png
+        ├── sound/
+        │   └── ...
+        ├── conf/
+        │   ├── actions.xml
+        │   ├── behaviors.xml
+        │   └── info.xml
+        └── metadata.json
+```
+
+`info.xml` and `sound/` are created only when those resources are available or referenced.  
+Point `--output` at a Shimeji-ee / VShimeji installation root to install downloaded image sets directly under its `img/` directory.  
+If the supplied output directory is itself named `img`, it is used directly instead of creating `img/img`.
 
 ## Existing downloads
 
-Existing valid configuration files and images are reused by default.  
+Existing valid configuration files, images, and referenced sounds are reused by default.  
 Re-running the same command therefore does not download files that are already present and valid.
 
 Use `--overwrite` to explicitly refresh and replace existing valid files:
@@ -79,15 +97,16 @@ Adding another site does not require modifying the probing engine or download co
 
 ## XML + adaptive probing
 
-1. **Fetch Configuration** - Fetch `actions.xml` and `behaviors.xml` when the source exposes them.
-2. **Parse XML** - Parse configuration with `lxml` and discover every referenced image path.
-3. **Download References** - Download XML-referenced assets as authoritative resources.
+1. **Fetch Configuration** - Fetch `actions.xml`, `behaviors.xml`, and optional `info.xml` when the source exposes them.
+2. **Parse XML** - Parse configuration with `lxml` and discover referenced images, preview/splash images, and sounds.
+3. **Download References** - Download XML-referenced resources as authoritative assets, placing sounds under the character's `sound/` directory.
 4. **Use XML Anchors** - Feed numeric `shimeN.png` references into the adaptive explorer as known anchors.
-5. **Probe Adaptively** - Probe the numeric namespace even when XML exists, so unreferenced extras can still be discovered.
-6. **Gallop On Success** - Increase the search distance exponentially while probes continue to match.
-7. **Bisect On Failure** - Narrow the dense frontier after the first failed exponential probe.
-8. **Explore Quiescence** - Search beyond the frontier using a quiet span derived from observed gaps and namespace size instead of a fixed index ceiling.
-9. **Separate Failure Semantics** - Treat XML-referenced misses as completeness errors while normal probe misses remain expected discovery evidence.
+5. **Probe Adaptively** - Probe the numeric image namespace even when XML exists, so unreferenced extras can still be discovered.
+6. **Gallop On Success** - Increase the image search distance exponentially while probes continue to match.
+7. **Bisect On Failure** - Narrow the dense image frontier after the first failed exponential probe.
+8. **Explore Quiescence** - Search beyond the image frontier using a quiet span derived from observed gaps and namespace size instead of a fixed index ceiling.
+9. **Avoid Sound Guessing** - Download sounds only when configuration references them; audio filenames are never numerically probed.
+10. **Separate Failure Semantics** - Treat XML-referenced misses as completeness errors while normal image-probe misses remain expected discovery evidence.
 
 `--probe auto` is the default. `--probe deep` widens sparse-tail exploration, and `--probe off` disables numeric probing entirely.
 
@@ -123,7 +142,7 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 
 ## License
 
-MIT License. See `LICENSE`.  
+MIT License. See `LICENSE`.
 THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
 ## LLM Notice
