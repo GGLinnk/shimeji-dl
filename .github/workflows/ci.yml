@@ -27,13 +27,18 @@ jobs:
         uses: astral-sh/ruff-action@v4.1.0
         with:
           version: "0.16.8"
-          args: "check --select E4,E7,E9,F,I src tests .github/scripts"
+          args: "check --select E4,E7,E9,F,I"
+          src: >-
+            src
+            tests
+            .github/scripts
 
       - name: Ruff security
         uses: astral-sh/ruff-action@v4.1.0
         with:
           version: "0.16.8"
-          args: "check --select S src"
+          args: "check --select S"
+          src: "src"
 
       - name: Mypy
         run: uv run --frozen --with "mypy==2.3.1" mypy --python-version 3.10 src/shimeji_dl/core src/shimeji_dl/formats src/shimeji_dl/sources src/shimeji_dl/ui src/shimeji_dl/version.py
