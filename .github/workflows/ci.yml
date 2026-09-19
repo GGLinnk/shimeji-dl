@@ -116,7 +116,9 @@ jobs:
       - name: Generate SLSA provenance
         uses: actions/attest@v4.2.1
         with:
-          subject-path: dist/*
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v7.0.1
