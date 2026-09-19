@@ -1,10 +1,15 @@
 from shimeji_dl.formats.shimeji_xml import ShimejiXmlFormat
 
 
-def test_extracts_image_attributes_with_lxml() -> None:
-    data = b'''<Mascot><ActionList><Pose Image="/shime1.png" ImageAnchor="1,2"/><Pose Image="nested/custom.png"/></ActionList></Mascot>'''
+def test_extracts_images_sounds_and_info_assets_with_lxml() -> None:
+    data = b'''<Mascot><ActionList><Pose Image="/shime1.png" ImageAnchor="1,2" Sound="step.wav"/><Pose Image="nested/custom.png"/></ActionList><Information><PreviewImage>preview.png</PreviewImage></Information></Mascot>'''
     refs = ShimejiXmlFormat().extract_asset_refs(data)
-    assert [ref.path for ref in refs] == ["shime1.png", "nested/custom.png"]
+    assert [ref.path for ref in refs] == [
+        "shime1.png",
+        "sound/step.wav",
+        "nested/custom.png",
+        "preview.png",
+    ]
 
 
 def test_rejects_external_entity_document() -> None:

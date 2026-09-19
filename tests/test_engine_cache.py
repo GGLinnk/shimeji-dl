@@ -6,6 +6,7 @@ from shimeji_dl.core.models import AssetRef, CharacterRef
 
 PNG_A = b"\x89PNG\r\n\x1a\nA"
 PNG_B = b"\x89PNG\r\n\x1a\nB"
+WAV = b"RIFF\x00\x00\x00\x00WAVE"
 
 
 class Response:
@@ -72,6 +73,25 @@ def test_existing_valid_asset_is_reused_by_default(tmp_path: Path) -> None:
     assert tried == []
     assert client.calls == 0
     assert (destination / "shime1.png").read_bytes() == PNG_A
+
+
+def test_existing_valid_sound_is_reused_by_default(tmp_path: Path) -> None:
+    character = CharacterRef("source", "character", "https://example/character")
+    destination = tmp_path / character.id
+    sound = destination / "sound" / "step.wav"
+    sound.parent.mkdir(parents=True)
+    sound.write_bytes(WAV)
+    client = Client()
+    engine = make_engine(tmp_path, client, overwrite=False)
+
+    _, success, tried = asyncio.run(
+        engine._download_ref(Source(), character, AssetRef("step.wav", "sound/step.wav"), destination)
+    )
+
+    assert success
+    assert tried == []
+    assert client.calls == 0
+    assert sound.read_bytes() == WAV
 
 
 def test_overwrite_refetches_existing_valid_asset(tmp_path: Path) -> None:

@@ -1,4 +1,6 @@
-from shimeji_dl.cli import _merge_retry_results, _should_retry
+from pathlib import Path
+
+from shimeji_dl.cli import _image_output_root, _merge_retry_results, _should_retry
 from shimeji_dl.core.models import CharacterRef, CharacterResult, ProbeReport
 
 
@@ -44,3 +46,8 @@ def test_retry_results_replace_only_retried_characters() -> None:
     merged = _merge_retry_results(first, retry)
     assert merged[0] is first[0]
     assert merged[1] is retry[0]
+
+
+def test_image_output_root_uses_native_shimeji_layout() -> None:
+    assert _image_output_root(Path("downloads")) == Path("downloads/img")
+    assert _image_output_root(Path("VShimeji/img")) == Path("VShimeji/img")

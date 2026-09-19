@@ -1,3 +1,4 @@
+from shimeji_dl.core.models import AssetRef
 from shimeji_dl.sources.shimejis_xyz import (
     ShimejisXYZSource,
     extract_pack_urls_from_html,
@@ -63,3 +64,19 @@ def test_whole_site_extracts_and_deduplicates_characters() -> None:
 
     characters = asyncio.run(ShimejisXYZSource().extract(Client(), "https://shimejis.xyz"))
     assert [character.id for character in characters] == ["shared-character", "undertale-sans", "sonic"]
+
+
+def test_source_exposes_desktop_compatible_optional_info_config() -> None:
+    assert ShimejisXYZSource.config_names == ("actions.xml", "behaviors.xml", "info.xml")
+
+
+def test_sound_candidates_cover_known_shimeji_package_locations() -> None:
+    source = ShimejisXYZSource()
+    character = source._character("undertale-sans")
+    urls = source.asset_candidates(character, AssetRef("step.wav", "sound/step.wav"))
+    assert urls == [
+        "https://sprites.shimejis.xyz/directory/undertale-sans/sound/step.wav",
+        "https://sprites.shimejis.xyz/directory/undertale-sans/img/sound/step.wav",
+        "https://sprite.shimejis.xyz/directory/undertale-sans/sound/step.wav",
+        "https://sprite.shimejis.xyz/directory/undertale-sans/img/sound/step.wav",
+    ]
