@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from collections.abc import Sequence
 
 from rich.console import Console
@@ -97,7 +98,7 @@ class RichReporter:
         if task is not None:
             self.progress.remove_task(task)
         self._completed += 1
-        if result.failed:
+        if result.retryable:
             self._failed += 1
         self._sync_visible_tasks()
         self._update_summary()
@@ -115,9 +116,12 @@ class RichReporter:
                         f"[red]error:[/red] {result.character.id}: {result.error}",
                         overflow="fold",
                     )
-                for missing in result.referenced_missing:
-                    self.warning(f"{result.character.id}: referenced-missing: {missing.path}")
-                    if self.verbose_enabled:
+                missing_counts = Counter(item.kind for item in result.referenced_missing)
+                for kind, count in sorted(missing_counts.items()):
+                    self.warning(f"{result.character.id}: {count} {kind} asset(s)")
+                if self.verbose_enabled:
+                    for missing in result.referenced_missing:
+                        self.verbose(f"{result.character.id}: {missing.kind}: {missing.path}")
                         for url in missing.tried_urls:
                             self.verbose(f"tried: {url}")
 

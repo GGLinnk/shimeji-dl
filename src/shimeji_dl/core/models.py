@@ -28,6 +28,29 @@ class ConfigResource:
 
 
 @dataclass(frozen=True, slots=True)
+class SpriteRegion:
+    path: str
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+@dataclass(slots=True)
+class SourceManifest:
+    source_url: str
+    authoritative: bool = False
+    configs: dict[str, bytes] = field(default_factory=dict)
+    spritesheet_url: str | None = None
+    sprites: dict[str, SpriteRegion] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def asset_refs(self) -> list[AssetRef]:
+        return [AssetRef(value=path, path=path) for path in self.sprites]
+
+
+@dataclass(frozen=True, slots=True)
 class MissingAsset:
     path: str
     kind: str
@@ -62,6 +85,8 @@ class CharacterResult:
     referenced_missing: list[MissingAsset]
     probe: ProbeReport
     usable: bool
+    manifest: SourceManifest | None = None
+    atlas_paths: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -71,6 +96,12 @@ class CharacterResult:
     @property
     def failed(self) -> bool:
         return not self.complete
+
+    @property
+    def retryable(self) -> bool:
+        if self.error or not self.usable:
+            return True
+        return any(item.kind != "source-missing" for item in self.referenced_missing)
 
     @property
     def strict_ok(self) -> bool:

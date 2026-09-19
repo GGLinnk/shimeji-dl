@@ -136,7 +136,7 @@ async def _run(**options: object) -> int:
         )
         results = await engine.download_all(characters)
 
-        failed = [result for result in results if result.failed]
+        failed = [result for result in results if result.retryable]
         if failed and _should_retry(
             reporter,
             len(failed),
@@ -157,9 +157,15 @@ async def _run(**options: object) -> int:
     reporter.report_results(results)
     usable = sum(result.usable for result in results)
     complete = sum(result.complete for result in results)
+    source_missing = sum(
+        any(item.kind == "source-missing" for item in result.referenced_missing)
+        for result in results
+    )
+    unusable = len(results) - usable
     strict_failures = sum(not result.strict_ok for result in results)
     reporter.info(
-        f"Finished: {usable}/{len(results)} usable, {complete}/{len(results)} complete character(s). "
+        f"Finished: {usable}/{len(results)} usable, {complete}/{len(results)} complete, "
+        f"{source_missing} source-missing, {unusable} unusable character(s). "
         f"Output: {options['output']}"
     )
 

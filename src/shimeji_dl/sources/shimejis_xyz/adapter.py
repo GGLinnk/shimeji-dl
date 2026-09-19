@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import Iterable
 from urllib.parse import urljoin, urlsplit
@@ -8,8 +9,14 @@ from urllib.parse import urljoin, urlsplit
 from lxml import html
 
 from ...core.http import HttpClient
-from ...core.models import AssetRef, CharacterRef, ConfigResource
-from ...core.storage import quote_asset_path
+from ...core.models import (
+    AssetRef,
+    CharacterRef,
+    ConfigResource,
+    SourceManifest,
+    SpriteRegion,
+)
+from ...core.storage import normalize_asset_ref, quote_asset_path
 
 SITE = "https://shimejis.xyz"
 DIRECTORY = f"{SITE}/directory"
@@ -62,6 +69,48 @@ class ShimejisXYZSource:
         if path.startswith("/directory/") and path.count("/") == 2:
             return await self._extract_pack(client, f"{SITE}{path}")
         raise ValueError(f"unsupported shimejis.xyz URL: {target}")
+
+    async def fetch_manifest(self, client: HttpClient, character: CharacterRef) -> SourceManifest | None:
+        url = f"{SITE}/api/shimeji/{character.id}/configuration"
+        response = await client.get(url, optional=True, headers=self.request_headers())
+        if response is None:
+            return None
+
+        try:
+            payload = json.loads(response.content)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        configs = {
+            filename: value.encode("utf-8")
+            for filename in self.config_names
+            if isinstance((value := payload.get(filename.removesuffix(".xml"))), str)
+        }
+        sprites = _parse_sprites(payload.get("sprites"))
+        spritesheet_url = _asset_url(payload.get("spritesheet"))
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        if spritesheet_url:
+            origin = _origin(spritesheet_url)
+            if origin in ASSET_HOSTS:
+                self._preferred_hosts[character.id] = (origin,) + tuple(
+                    host for host in ASSET_HOSTS if host != origin
+                )
+
+        if not configs and not sprites:
+            return None
+        return SourceManifest(
+            source_url=response.url,
+            authoritative=True,
+            configs=configs,
+            spritesheet_url=spritesheet_url,
+            sprites=sprites,
+            metadata=metadata,
+        )
 
     def request_headers(self) -> dict[str, str]:
         return {"Referer": f"{SITE}/"}
@@ -191,3 +240,38 @@ def _unique_characters(characters: Iterable[CharacterRef]) -> list[CharacterRef]
 def _origin(url: str) -> str:
     parsed = urlsplit(url)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _asset_url(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or _origin(value) not in ASSET_HOSTS:
+        return None
+    return value
+
+
+def _parse_sprites(value: object) -> dict[str, SpriteRegion]:
+    if not isinstance(value, dict):
+        return {}
+    sprites: dict[str, SpriteRegion] = {}
+    for raw_path, raw_region in value.items():
+        if not isinstance(raw_path, str) or not isinstance(raw_region, dict):
+            continue
+        normalized = normalize_asset_ref(raw_path)
+        if normalized is None:
+            continue
+        path, absolute_url = normalized
+        if absolute_url is not None or not path.lower().endswith(".png"):
+            continue
+        try:
+            x = int(raw_region["x"])
+            y = int(raw_region["y"])
+            width = int(raw_region["width"])
+            height = int(raw_region["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if min(x, y) < 0 or min(width, height) <= 0:
+            continue
+        sprites[path] = SpriteRegion(path, x, y, width, height)
+    return sprites

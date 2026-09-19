@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from .http import HttpClient
-from .models import AssetRef, CharacterRef, CharacterResult, ConfigResource
+from .models import (
+    AssetRef,
+    CharacterRef,
+    CharacterResult,
+    ConfigResource,
+    SourceManifest,
+)
 
 
 class ConfigFormat(Protocol):
@@ -33,6 +39,13 @@ class SourceAdapter(Protocol):
     def numeric_asset(self, character: CharacterRef, index: int) -> AssetRef: ...
 
     def prioritize(self, character: CharacterRef, configs: Iterable[ConfigResource | None]) -> None: ...
+
+
+@runtime_checkable
+class ManifestSourceAdapter(Protocol):
+    """Optional source capability for an authoritative per-character manifest."""
+
+    async def fetch_manifest(self, client: HttpClient, character: CharacterRef) -> SourceManifest | None: ...
 
 
 class Reporter(Protocol):
