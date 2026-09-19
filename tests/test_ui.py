@@ -2,7 +2,12 @@ from io import StringIO
 
 from rich.console import Console
 
-from shimeji_dl.core.models import CharacterRef, CharacterResult, ProbeReport
+from shimeji_dl.core.models import (
+    CharacterRef,
+    CharacterResult,
+    MissingAsset,
+    ProbeReport,
+)
 from shimeji_dl.ui.rich import RichReporter
 
 
@@ -72,3 +77,21 @@ def test_progress_folds_long_character_names_instead_of_ellipsis() -> None:
     rendered = stream.getvalue()
     assert "..." not in rendered
     assert "ellipsized" in rendered
+
+
+def test_missing_assets_are_aggregated_until_verbose_output() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(verbose=False, console=console, error_console=console)
+    character = CharacterRef("source", "partial", "https://example")
+    result = _result(character)
+    result.referenced_missing = [
+        MissingAsset("sound/one.wav", "source-missing", ("https://example/one.wav",)),
+        MissingAsset("sound/two.wav", "source-missing", ("https://example/two.wav",)),
+    ]
+
+    reporter.report_results([result])
+
+    rendered = stream.getvalue()
+    assert "partial: 2 source-missing asset(s)" in rendered
+    assert "sound/one.wav" not in rendered

@@ -1,3 +1,6 @@
+import asyncio
+import json
+
 from shimeji_dl.core.models import AssetRef
 from shimeji_dl.sources.shimejis_xyz import (
     ShimejisXYZSource,
@@ -80,3 +83,59 @@ def test_sound_candidates_cover_known_shimeji_package_locations() -> None:
         "https://sprite.shimejis.xyz/directory/undertale-sans/sound/step.wav",
         "https://sprite.shimejis.xyz/directory/undertale-sans/img/sound/step.wav",
     ]
+
+
+def test_configuration_api_is_parsed_as_an_authoritative_sprite_manifest() -> None:
+    payload = {
+        "actions": "<Mascot><Pose Image='/shime1.png'/></Mascot>",
+        "behaviors": "<Mascot/>",
+        "sprites": {
+            "/shime1.png": {"x": 1, "y": 2, "width": 3, "height": 4},
+            "/nested/shime2.png": {"x": 5, "y": 6, "width": 7, "height": 8},
+            "/invalid.jpg": {"x": 0, "y": 0, "width": 1, "height": 1},
+            "../escape.png": {"x": 0, "y": 0, "width": 1, "height": 1},
+        },
+        "spritesheet": "https://sprites.shimejis.xyz/directory/example/spritesheet.png",
+        "metadata": {"shimejiName": "Example"},
+    }
+
+    class Response:
+        url = "https://shimejis.xyz/api/shimeji/example/configuration"
+        content = json.dumps(payload).encode()
+
+    class Client:
+        async def get(self, *args, **kwargs):
+            return Response()
+
+    source = ShimejisXYZSource()
+    manifest = asyncio.run(source.fetch_manifest(Client(), source._character("example")))
+
+    assert manifest is not None
+    assert manifest.authoritative
+    assert set(manifest.configs) == {"actions.xml", "behaviors.xml"}
+    assert list(manifest.sprites) == ["shime1.png", "nested/shime2.png"]
+    assert manifest.sprites["shime1.png"].width == 3
+    assert manifest.spritesheet_url == payload["spritesheet"]
+    assert manifest.metadata == {"shimejiName": "Example"}
+
+
+def test_configuration_api_rejects_untrusted_spritesheet_origin() -> None:
+    payload = {
+        "actions": "<Mascot/>",
+        "sprites": {"/shime1.png": {"x": 0, "y": 0, "width": 1, "height": 1}},
+        "spritesheet": "https://example.com/spritesheet.png",
+    }
+
+    class Response:
+        url = "https://shimejis.xyz/api/shimeji/example/configuration"
+        content = json.dumps(payload).encode()
+
+    class Client:
+        async def get(self, *args, **kwargs):
+            return Response()
+
+    source = ShimejisXYZSource()
+    manifest = asyncio.run(source.fetch_manifest(Client(), source._character("example")))
+
+    assert manifest is not None
+    assert manifest.spritesheet_url is None
