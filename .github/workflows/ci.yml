@@ -104,11 +104,14 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Verify lockfile
+        run: uv lock --check
+
       - name: Build distributions
-        run: uv build --frozen
+        run: uv build
 
       - name: Smoke test distributions
-        run: uv run --frozen python .github/scripts/smoke_dist.py
+        run: uv run --locked python .github/scripts/smoke_dist.py
 
       - name: Generate SLSA provenance
         uses: actions/attest@v4.2.1
