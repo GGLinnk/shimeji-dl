@@ -1,6 +1,6 @@
 # shimeji-dl
 
-Asynchronous Shimeji downloader with pluggable source adapters, XML-driven asset discovery, adaptive numeric probing, persistent local reuse, and concurrent terminal progress.
+Asynchronous Shimeji downloader with pluggable source adapters, optional source manifests, XML-driven asset discovery, adaptive numeric probing, persistent local reuse, and concurrent terminal progress.
 
 ## Install / run with uv
 
@@ -92,23 +92,28 @@ src/shimeji_dl/
 └── version.py             # Reads installed metadata; pyproject.toml is the SSOT
 ```
 
-The generic downloader only talks to protocols (`SourceAdapter`, `ConfigFormat`, `Reporter`).  
+The generic downloader only talks to protocols (`SourceAdapter`, optional `ManifestSourceAdapter`, `ConfigFormat`, and `Reporter`).
+
 Adding another site does not require modifying the probing engine or download core.
+A source can optionally expose an authoritative manifest and sprite atlas without making that capability mandatory for other adapters.
 
-## XML + adaptive probing
+## Discovery and fallback strategy
 
-1. **Fetch Configuration** - Fetch `actions.xml`, `behaviors.xml`, and optional `info.xml` when the source exposes them.
-2. **Parse XML** - Parse configuration with `lxml` and discover referenced images, preview/splash images, and sounds.
-3. **Download References** - Download XML-referenced resources as authoritative assets, placing sounds under the character's `sound/` directory.
-4. **Use XML Anchors** - Feed numeric `shimeN.png` references into the adaptive explorer as known anchors.
-5. **Probe Adaptively** - Probe the numeric image namespace even when XML exists, so unreferenced extras can still be discovered.
-6. **Gallop On Success** - Increase the image search distance exponentially while probes continue to match.
-7. **Bisect On Failure** - Narrow the dense image frontier after the first failed exponential probe.
-8. **Explore Quiescence** - Search beyond the image frontier using a quiet span derived from observed gaps and namespace size instead of a fixed index ceiling.
+1. **Use a Source Manifest When Available** - The `shimejis.xyz` adapter reads `/api/shimeji/<slug>/configuration`, including the exact XML, sprite map, spritesheet URL, and public metadata.
+2. **Materialize the Sprite Atlas** - The generic engine safely crops manifest regions into the individual PNG files expected by Shimeji-ee and VShimeji.
+3. **Fetch Configuration Fallbacks** - Fetch `actions.xml`, `behaviors.xml`, and optional `info.xml` from traditional source URLs when no manifest supplies them.
+4. **Parse XML** - Parse configuration with `lxml` and discover referenced images, preview/splash images, and sounds.
+5. **Download Remaining References** - Download XML-referenced resources not supplied by the atlas, placing sounds under the character's `sound/` directory.
+6. **Classify Source Omissions** - A manifest-backed source distinguishes assets absent from its public package from retryable transfer failures.
+7. **Keep Probing Available** - The original adaptive numeric strategy remains the generic fallback for sources without an authoritative manifest or whenever manifest retrieval fails.
+   Explicit `--probe deep` also probes beyond an authoritative manifest.
+8. **Gallop, Bisect, and Explore Quiescence** - The fallback prober expands successful ranges, narrows the frontier, and searches sparse tails without a fixed index ceiling.
 9. **Avoid Sound Guessing** - Download sounds only when configuration references them; audio filenames are never numerically probed.
-10. **Separate Failure Semantics** - Treat XML-referenced misses as completeness errors while normal image-probe misses remain expected discovery evidence.
+10. **Preserve Strict Semantics** - Source omissions still make a package incomplete under `--strict`, but they are not retried indefinitely.
 
-`--probe auto` is the default. `--probe deep` widens sparse-tail exploration, and `--probe off` disables numeric probing entirely.
+`--probe auto` is the default.  
+`--probe deep` widens sparse-tail exploration.  
+`--probe off` disables numeric probing entirely.
 
 ## Dependencies
 
@@ -117,6 +122,7 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 - `httpx` - Async HTTP transport and connection pooling.
 - `tenacity` - Retry policy and exponential backoff.
 - `lxml` - HTML/XML parsing and XPath.
+- `Pillow` - Safe extraction of individual PNG files from source-provided sprite atlases.
 - `rich` - Concurrent terminal progress, wrapping output and interactive confirmations.
 - `typer` - CLI declaration, validation, help and option parsing.
 
@@ -142,7 +148,8 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 
 ## License
 
-MIT License. See `LICENSE`.
+MIT License.
+See `LICENSE`.
 THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
 ## LLM Notice
