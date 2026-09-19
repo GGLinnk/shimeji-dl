@@ -30,7 +30,7 @@ class RichReporter:
         self._started = False
 
     def _make_progress(self) -> Progress:
-        return Progress(
+        progress = Progress(
             SpinnerColumn(table_column=Column(width=1, no_wrap=True)),
             TextColumn(
                 "{task.description} [dim]{task.fields[phase]}[/dim]",
@@ -40,6 +40,8 @@ class RichReporter:
             transient=False,
             expand=True,
         )
+        progress.live.vertical_overflow = "visible"
+        return progress
 
     def extraction(self, source: str, target: str) -> None:
         if not self.quiet:
