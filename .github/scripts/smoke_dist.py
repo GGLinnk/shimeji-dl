@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import subprocess
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "dist"

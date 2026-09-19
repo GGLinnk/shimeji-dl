@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 
 def _fail(message: str) -> None:
