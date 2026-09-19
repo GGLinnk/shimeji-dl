@@ -27,6 +27,12 @@ class RichReporter:
         self.error_console = error_console or Console(stderr=True)
         self.progress = self._make_progress()
         self._tasks: dict[str, TaskID] = {}
+        self._active: dict[str, str] = {}
+        self._summary_task: TaskID | None = None
+        self._total = 0
+        self._completed = 0
+        self._failed = 0
+        self._visible_capacity = 1
         self._started = False
 
     def _make_progress(self) -> Progress:
@@ -54,52 +60,80 @@ class RichReporter:
             self.finish()
         self.progress = self._make_progress()
         self._tasks.clear()
+        self._active.clear()
+        self._total = len(characters)
+        self._completed = 0
+        self._failed = 0
+        self._visible_capacity = max(1, self.console.height - 3)
         self.progress.start()
         self._started = True
-        for character in characters:
-            self._tasks[character.id] = self.progress.add_task(character.id, total=None, phase="Queued")
+        self._summary_task = self.progress.add_task("Progress", total=1, completed=1, phase="")
+        self._update_summary()
 
     def character_started(self, character: CharacterRef) -> None:
-        self.character_phase(character, "Starting")
+        if self.quiet:
+            return
+        self._active[character.id] = "Starting"
+        self._sync_visible_tasks()
+        self._update_summary()
 
     def character_phase(self, character: CharacterRef, phase: str, detail: str = "") -> None:
         if self.quiet:
             return
+        suffix = f" · {detail}" if detail else ""
+        phase_text = f"{phase}{suffix}"
+        self._active[character.id] = phase_text
         task = self._tasks.get(character.id)
         if task is not None:
-            suffix = f" · {detail}" if detail else ""
-            self.progress.update(task, phase=f"{phase}{suffix}")
+            self.progress.update(task, phase=phase_text)
+        else:
+            self._sync_visible_tasks()
 
     def character_finished(self, result: CharacterResult) -> None:
         if self.quiet:
             return
-        task = self._tasks.get(result.character.id)
-        if result.error:
-            details = f"[red]failed[/red] · {result.error}"
-        else:
-            config_labels = [name for name, config in result.configs.items() if config]
-            details = f"{len(result.asset_paths)} sprite(s)"
-            if config_labels:
-                details += " · " + ", ".join(config_labels)
-            if result.referenced_missing:
-                details += f" · [yellow]{len(result.referenced_missing)} missing[/yellow]"
+        self._active.pop(result.character.id, None)
+        task = self._tasks.pop(result.character.id, None)
         if task is not None:
-            self.progress.update(task, phase=details, completed=1, total=1)
-            self.progress.stop_task(task)
+            self.progress.remove_task(task)
+        self._completed += 1
+        if result.failed:
+            self._failed += 1
+        self._sync_visible_tasks()
+        self._update_summary()
 
-        for missing in result.referenced_missing:
-            self.warning(f"{result.character.id}: referenced-missing: {missing.path}")
-            if self.verbose_enabled:
-                for url in missing.tried_urls:
-                    self.verbose(f"tried: {url}")
-        if self.verbose_enabled and result.probe.mode != "off":
-            self.verbose(
-                f"{result.character.id}: probe hits={len(result.probe.hits)}, "
-                f"extras={len(result.probe.extra_hits)}, tested={result.probe.requests}, "
-                f"highest={result.probe.highest_tested}, stop={result.probe.stop_reason}"
-            )
-            if result.probe.misses:
-                self.verbose(f"{result.character.id}: probe-missing: {', '.join(compress_numbers(result.probe.misses))}")
+    def report_results(self, results: Sequence[CharacterResult]) -> None:
+        if self.quiet:
+            return
+
+        issues = [result for result in results if result.error or result.referenced_missing]
+        if issues:
+            self.progress.console.print(f"[bold]Issues:[/bold] {len(issues)} character(s)", overflow="fold")
+            for result in issues:
+                if result.error:
+                    self.progress.console.print(
+                        f"[red]error:[/red] {result.character.id}: {result.error}",
+                        overflow="fold",
+                    )
+                for missing in result.referenced_missing:
+                    self.warning(f"{result.character.id}: referenced-missing: {missing.path}")
+                    if self.verbose_enabled:
+                        for url in missing.tried_urls:
+                            self.verbose(f"tried: {url}")
+
+        if self.verbose_enabled:
+            for result in results:
+                if result.probe.mode == "off":
+                    continue
+                self.verbose(
+                    f"{result.character.id}: probe hits={len(result.probe.hits)}, "
+                    f"extras={len(result.probe.extra_hits)}, tested={result.probe.requests}, "
+                    f"highest={result.probe.highest_tested}, stop={result.probe.stop_reason}"
+                )
+                if result.probe.misses:
+                    self.verbose(
+                        f"{result.character.id}: probe-missing: {', '.join(compress_numbers(result.probe.misses))}"
+                    )
 
     def warning(self, message: str) -> None:
         if not self.quiet:
@@ -125,3 +159,32 @@ class RichReporter:
 
     def fatal(self, message: str) -> None:
         self.error_console.print(f"[red]error:[/red] {message}", overflow="fold")
+
+    def _sync_visible_tasks(self) -> None:
+        for character_id, task in list(self._tasks.items()):
+            if character_id not in self._active:
+                self.progress.remove_task(task)
+                del self._tasks[character_id]
+
+        for character_id, phase in self._active.items():
+            if character_id in self._tasks:
+                continue
+            if len(self._tasks) >= self._visible_capacity:
+                break
+            self._tasks[character_id] = self.progress.add_task(character_id, total=None, phase=phase)
+
+    def _update_summary(self) -> None:
+        if self._summary_task is None:
+            return
+        queued = max(0, self._total - self._completed - len(self._active))
+        hidden = max(0, len(self._active) - len(self._tasks))
+        failed = f"[red]{self._failed} failed[/red]" if self._failed else "0 failed"
+        parts = [
+            f"{self._completed}/{self._total} done",
+            f"{len(self._active)} active",
+            f"{queued} queued",
+            failed,
+        ]
+        if hidden:
+            parts.append(f"{hidden} hidden")
+        self.progress.update(self._summary_task, phase=" · ".join(parts))

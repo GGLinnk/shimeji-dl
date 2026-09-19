@@ -154,6 +154,7 @@ async def _run(**options: object) -> int:
             retried = await retry_engine.download_all([result.character for result in failed])
             results = _merge_retry_results(results, retried)
 
+    reporter.report_results(results)
     usable = sum(result.usable for result in results)
     complete = sum(result.complete for result in results)
     strict_failures = sum(not result.strict_ok for result in results)
