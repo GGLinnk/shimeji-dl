@@ -8,6 +8,41 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Ruff lint
+        uses: astral-sh/ruff-action@v4.1.0
+        with:
+          version: "0.16.8"
+          args: "check --select E4,E7,E9,F,I src tests .github/scripts"
+
+      - name: Ruff security
+        uses: astral-sh/ruff-action@v4.1.0
+        with:
+          version: "0.16.8"
+          args: "check --select S src"
+
+      - name: Mypy
+        run: uv run --frozen --with "mypy==2.3.1" mypy --python-version 3.10 src/shimeji_dl/core src/shimeji_dl/formats src/shimeji_dl/sources src/shimeji_dl/ui src/shimeji_dl/version.py
+
+      - name: Audit dependencies
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: .
+
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -25,6 +60,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.1.0
@@ -32,7 +69,52 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --frozen --group dev
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run --frozen pytest
+
+  package:
+    name: Build release artifact
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - quality
+      - test
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Build distributions
+        run: uv build --frozen
+
+      - name: Smoke test distributions
+        run: uv run --frozen python .github/scripts/smoke_dist.py
+
+      - name: Generate SLSA provenance
+        uses: actions/attest@v4.2.1
+        with:
+          subject-path: dist/*
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dist-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
