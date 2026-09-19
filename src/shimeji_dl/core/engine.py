@@ -8,7 +8,14 @@ from pathlib import Path
 from ..version import get_version
 from .http import HttpClient
 from .interfaces import ConfigFormat, Reporter, SourceAdapter
-from .models import AssetRef, CharacterRef, CharacterResult, ConfigResource, MissingAsset, ProbeReport
+from .models import (
+    AssetRef,
+    CharacterRef,
+    CharacterResult,
+    ConfigResource,
+    MissingAsset,
+    ProbeReport,
+)
 from .probing import AdaptiveNumericProber, numeric_indices
 from .storage import (
     atomic_write,

@@ -1,6 +1,10 @@
 import asyncio
 
-from shimeji_dl.core.probing import AdaptiveNumericProber, adaptive_quiet_span, numeric_index
+from shimeji_dl.core.probing import (
+    AdaptiveNumericProber,
+    adaptive_quiet_span,
+    numeric_index,
+)
 
 
 def test_numeric_index() -> None:

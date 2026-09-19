@@ -4,7 +4,6 @@ from pathlib import Path
 from shimeji_dl.core.engine import DownloadEngine, DownloadOptions
 from shimeji_dl.core.models import AssetRef, CharacterRef
 
-
 PNG_A = b"\x89PNG\r\n\x1a\nA"
 PNG_B = b"\x89PNG\r\n\x1a\nB"
 

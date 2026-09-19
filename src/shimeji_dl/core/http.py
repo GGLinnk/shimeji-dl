@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import httpx
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_random_exponential
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
 RETRIABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 OPTIONAL_STATUS = {400, 401, 403, 404, 405, 410}
@@ -96,5 +101,6 @@ class HttpClient:
 
     async def get_text(self, url: str, *, headers: dict[str, str] | None = None) -> str:
         result = await self.get(url, optional=False, headers=headers)
-        assert result is not None
+        if result is None:
+            raise HttpError(f"request returned no result: {url}")
         return result.content.decode("utf-8", errors="replace")
