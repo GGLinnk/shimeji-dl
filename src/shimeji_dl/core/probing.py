@@ -34,10 +34,11 @@ def adaptive_quiet_span(hits: Iterable[int], mode: str, *, span_hint: int = 0) -
 
 
 class AdaptiveNumericProber:
-    """Generic adaptive explorer for a numeric namespace.
+    """
+    Generic adaptive explorer for a numeric namespace.  
 
-    The callback owns the concrete naming/transport. The algorithm only reasons
-    about positive integer indices, making it reusable outside Shimeji sources.
+    The callback owns the concrete naming and transport.  
+    The algorithm only reasons about positive integer indices, making it reusable outside Shimeji sources.
     """
 
     def __init__(self, *, mode: str = "auto", batch_size: int = 64) -> None:
