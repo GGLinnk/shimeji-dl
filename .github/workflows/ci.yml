@@ -41,7 +41,7 @@ jobs:
           src: "src"
 
       - name: Mypy
-        run: uv run --frozen --with "mypy==2.3.1" mypy --python-version 3.10 src/shimeji_dl/core src/shimeji_dl/formats src/shimeji_dl/sources src/shimeji_dl/ui src/shimeji_dl/version.py
+        run: uv run --frozen --with "mypy==2.3.1" --with "types-lxml==2026.2.16" mypy --python-version 3.10 src/shimeji_dl/core src/shimeji_dl/formats src/shimeji_dl/sources src/shimeji_dl/ui src/shimeji_dl/version.py
 
       - name: Audit dependencies
         uses: pypa/gh-action-pip-audit@v1.1.0
