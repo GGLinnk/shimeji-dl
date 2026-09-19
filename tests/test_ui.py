@@ -6,6 +6,14 @@ from shimeji_dl.core.models import CharacterRef, CharacterResult, ProbeReport
 from shimeji_dl.ui.rich import RichReporter
 
 
+def test_progress_keeps_all_rows_visible_when_taller_than_terminal() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=42, height=5, force_terminal=False)
+    reporter = RichReporter(console=console, error_console=console)
+
+    assert reporter.progress.live.vertical_overflow == "visible"
+
+
 def test_progress_folds_long_character_names_instead_of_ellipsis() -> None:
     stream = StringIO()
     console = Console(file=stream, width=42, force_terminal=False)
