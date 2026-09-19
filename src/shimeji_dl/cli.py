@@ -40,7 +40,10 @@ def _version_callback(value: bool) -> None:
 @app.command()
 def download(
     targets: Annotated[list[str], typer.Argument(help="Pack URL, character URL, site URL, or supported source identifier.")],
-    output: Annotated[Path, typer.Option("--output", "-o", help="Output directory.")] = Path("shimeji-downloads"),
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="Shimeji-compatible output root; characters are stored under img/."),
+    ] = Path("shimeji-downloads"),
     jobs: Annotated[int, typer.Option("--jobs", "-j", min=1, help="Characters downloaded concurrently.")] = 5,
     connections: Annotated[int, typer.Option(min=1, help="Maximum concurrent HTTP requests.")] = 20,
     timeout: Annotated[float, typer.Option(min=0.1, help="HTTP timeout in seconds.")] = 20.0,
@@ -114,8 +117,10 @@ async def _run(**options: object) -> int:
             reporter.fatal(str(exc))
             return 2
 
+        output_root = Path(options["output"])
+        image_root = _image_output_root(output_root)
         download_options = DownloadOptions(
-            output=Path(options["output"]),
+            output=image_root,
             jobs=int(options["jobs"]),
             probe_mode=str(options["probe"]),
             overwrite=bool(options["overwrite"]),
@@ -217,6 +222,10 @@ def _merge_retry_results(
 ) -> list[CharacterResult]:
     replacements = {(result.character.source, result.character.id): result for result in retried}
     return [replacements.get((result.character.source, result.character.id), result) for result in original]
+
+
+def _image_output_root(output: Path) -> Path:
+    return output if output.name.casefold() == "img" else output / "img"
 
 
 def _make_archive(output: Path) -> Path:

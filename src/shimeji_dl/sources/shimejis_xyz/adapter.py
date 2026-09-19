@@ -21,7 +21,7 @@ WHOLE_SITE_TARGETS = {"shimejis.xyz", "www.shimejis.xyz"}
 
 class ShimejisXYZSource:
     key = "shimejis.xyz"
-    config_names = ("actions.xml", "behaviors.xml")
+    config_names = ("actions.xml", "behaviors.xml", "info.xml")
 
     def __init__(self) -> None:
         self._preferred_hosts: dict[str, tuple[str, ...]] = {}
@@ -74,8 +74,18 @@ class ShimejisXYZSource:
     def asset_candidates(self, character: CharacterRef, ref: AssetRef) -> list[str]:
         if ref.absolute_url:
             return [ref.absolute_url]
+
+        roots = self._roots(character)
+        if ref.path.lower().startswith("sound/"):
+            quoted = quote_asset_path(ref.path[len("sound/"):])
+            return [
+                candidate
+                for root in roots
+                for candidate in (f"{root}/sound/{quoted}", f"{root}/img/sound/{quoted}")
+            ]
+
         quoted = quote_asset_path(ref.path)
-        return [f"{root}/img/{quoted}" for root in self._roots(character)]
+        return [f"{root}/img/{quoted}" for root in roots]
 
     def numeric_asset(self, character: CharacterRef, index: int) -> AssetRef:
         path = f"shime{index}.png"

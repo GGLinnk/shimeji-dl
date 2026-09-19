@@ -3,7 +3,7 @@ from __future__ import annotations
 from lxml import etree
 
 from ..core.models import AssetRef
-from ..core.storage import normalize_asset_ref
+from ..core.storage import normalize_resource_ref
 
 
 class ShimejiXmlFormat:
@@ -28,8 +28,11 @@ class ShimejiXmlFormat:
 
         refs: list[AssetRef] = []
         seen: set[tuple[str, str | None]] = set()
-        for value in root.xpath("//@*"):
-            normalized = normalize_asset_ref(str(value))
+        values = [str(value) for value in root.xpath("//@*")]
+        values.extend(str(value) for value in root.xpath("//text()[normalize-space()]") if str(value).strip())
+
+        for value in values:
+            normalized = normalize_resource_ref(value)
             if normalized is None:
                 continue
             path, absolute_url = normalized
@@ -37,5 +40,5 @@ class ShimejiXmlFormat:
             if key in seen:
                 continue
             seen.add(key)
-            refs.append(AssetRef(value=str(value), path=path, absolute_url=absolute_url))
+            refs.append(AssetRef(value=value, path=path, absolute_url=absolute_url))
         return refs

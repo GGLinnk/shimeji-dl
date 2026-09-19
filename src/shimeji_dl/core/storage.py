@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit
 
 IMAGE_SUFFIXES = {".png", ".gif", ".jpg", ".jpeg", ".webp", ".bmp"}
+AUDIO_SUFFIXES = {".wav", ".aif", ".aiff", ".au", ".mp3", ".ogg"}
 
 
 def atomic_write(path: Path, data: bytes) -> None:
@@ -21,7 +22,7 @@ def atomic_write_json(path: Path, value: object) -> None:
     atomic_write(path, payload)
 
 
-def normalize_asset_ref(value: str) -> tuple[str, str | None] | None:
+def normalize_resource_ref(value: str) -> tuple[str, str | None] | None:
     raw = value.strip()
     if not raw:
         return None
@@ -45,9 +46,24 @@ def normalize_asset_ref(value: str) -> tuple[str, str | None] | None:
     path = PurePosixPath(candidate)
     if not candidate or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         return None
-    if ":" in path.parts[0] or path.suffix.lower() not in IMAGE_SUFFIXES:
+    if ":" in path.parts[0]:
         return None
-    return path.as_posix(), absolute_url
+
+    suffix = path.suffix.lower()
+    if suffix in IMAGE_SUFFIXES:
+        return path.as_posix(), absolute_url
+    if suffix in AUDIO_SUFFIXES:
+        if not path.parts or path.parts[0].lower() != "sound":
+            path = PurePosixPath("sound") / path
+        return path.as_posix(), absolute_url
+    return None
+
+
+def normalize_asset_ref(value: str) -> tuple[str, str | None] | None:
+    normalized = normalize_resource_ref(value)
+    if normalized is None or PurePosixPath(normalized[0]).suffix.lower() not in IMAGE_SUFFIXES:
+        return None
+    return normalized
 
 
 def quote_asset_path(path: str) -> str:
@@ -70,9 +86,42 @@ def looks_like_image(data: bytes, path: str, content_type: str | None = None) ->
     return checker(data) if checker else bool(content_type and content_type.lower().startswith("image/"))
 
 
+def looks_like_audio(data: bytes, path: str, content_type: str | None = None) -> bool:
+    if not data:
+        return False
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix == ".wav":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+    if suffix in {".aif", ".aiff"}:
+        return len(data) >= 12 and data[:4] == b"FORM" and data[8:12] in {b"AIFF", b"AIFC"}
+    if suffix == ".au":
+        return data.startswith(b".snd")
+    if suffix == ".ogg":
+        return data.startswith(b"OggS")
+    if suffix == ".mp3":
+        return data.startswith(b"ID3") or (len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
+    return bool(content_type and content_type.lower().startswith("audio/"))
+
+
+def looks_like_resource(data: bytes, path: str, content_type: str | None = None) -> bool:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in IMAGE_SUFFIXES:
+        return looks_like_image(data, path, content_type)
+    if suffix in AUDIO_SUFFIXES:
+        return looks_like_audio(data, path, content_type)
+    return False
+
+
 def is_valid_local_image(path: Path) -> bool:
     try:
         return looks_like_image(path.read_bytes(), path.name)
+    except OSError:
+        return False
+
+
+def is_valid_local_resource(path: Path) -> bool:
+    try:
+        return looks_like_resource(path.read_bytes(), path.name)
     except OSError:
         return False
 
@@ -88,6 +137,21 @@ def collect_images(root: Path) -> list[str]:
             and "conf" not in path.relative_to(root).parts
             and path.suffix.lower() in IMAGE_SUFFIXES
             and is_valid_local_image(path)
+        ),
+        key=natural_key,
+    )
+
+
+def collect_sounds(root: Path) -> list[str]:
+    if not root.exists():
+        return []
+    return sorted(
+        (
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in AUDIO_SUFFIXES
+            and is_valid_local_resource(path)
         ),
         key=natural_key,
     )

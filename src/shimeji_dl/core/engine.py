@@ -21,9 +21,10 @@ from .storage import (
     atomic_write,
     atomic_write_json,
     collect_images,
+    collect_sounds,
     compress_numbers,
-    is_valid_local_image,
-    looks_like_image,
+    is_valid_local_resource,
+    looks_like_resource,
     natural_key,
 )
 
@@ -184,7 +185,7 @@ class DownloadEngine:
         if (
             local_path.exists()
             and not self.options.overwrite
-            and await asyncio.to_thread(is_valid_local_image, local_path)
+            and await asyncio.to_thread(is_valid_local_resource, local_path)
         ):
             return ref, True, []
 
@@ -192,7 +193,7 @@ class DownloadEngine:
         for url in source.asset_candidates(character, ref):
             tried.append(url)
             response = await self.client.get(url, optional=True, headers=source.request_headers())
-            if response is None or not looks_like_image(response.content, ref.path, response.content_type):
+            if response is None or not looks_like_resource(response.content, ref.path, response.content_type):
                 continue
             await asyncio.to_thread(atomic_write, local_path, response.content)
             return ref, True, tried
@@ -221,12 +222,13 @@ class DownloadEngine:
         )
 
     def _write_metadata(self, dest: Path, result: CharacterResult) -> None:
+        sounds = collect_sounds(dest)
         referenced = sorted(
             {ref.path for config in result.configs.values() if config for ref in config.asset_refs},
             key=natural_key,
         )
         metadata = {
-            "schema_version": 4,
+            "schema_version": 5,
             "tool": {"name": "shimeji-dl", "version": get_version()},
             "source_adapter": result.character.source,
             "id": result.character.id,
@@ -263,6 +265,8 @@ class DownloadEngine:
                 "count": len(result.asset_paths),
                 "files": result.asset_paths,
                 "probe_only": result.probe.extra_hits,
+                "sound_count": len(sounds),
+                "sounds": sounds,
                 "referenced_missing": [
                     {"path": item.path, "kind": item.kind, "tried_urls": list(item.tried_urls)}
                     for item in result.referenced_missing
