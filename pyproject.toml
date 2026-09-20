@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "shimeji-dl"
-version = "0.7.0"
+version = "0.8.0"
 description = "Asynchronous Shimeji package downloader with pluggable sources and adaptive asset discovery"
 readme = "README.md"
 license = "MIT"
