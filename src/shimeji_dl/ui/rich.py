@@ -5,6 +5,7 @@ from collections import Counter
 from collections.abc import Sequence
 
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn
 from rich.prompt import Confirm
 from rich.table import Column
@@ -31,12 +32,15 @@ class RichReporter:
         self._active: dict[str, str] = {}
         self._summary_task: TaskID | None = None
         self._total = 0
-        self._completed = 0
         self._failed = 0
         self._visible_capacity = 1
         self._started = False
 
     def _make_progress(self) -> Progress:
+        # No BarColumn or MofNCompleteColumn: every column here is
+        # shared with the per-character rows, and a fixed-width column
+        # would steal space a long character name needs to fold instead
+        # of ellipsizing.  The completed count is reported as text.
         progress = Progress(
             SpinnerColumn(table_column=Column(width=1, no_wrap=True)),
             TextColumn(
@@ -63,12 +67,11 @@ class RichReporter:
         self._tasks.clear()
         self._active.clear()
         self._total = len(characters)
-        self._completed = 0
         self._failed = 0
         self._visible_capacity = max(1, self.console.height - 3)
         self.progress.start()
         self._started = True
-        self._summary_task = self.progress.add_task("Progress", total=1, completed=1, phase="")
+        self._summary_task = self.progress.add_task("Progress", total=self._total, completed=0, phase="")
         self._update_summary()
 
     def character_started(self, character: CharacterRef) -> None:
@@ -97,9 +100,10 @@ class RichReporter:
         task = self._tasks.pop(result.character.id, None)
         if task is not None:
             self.progress.remove_task(task)
-        self._completed += 1
         if result.retryable:
             self._failed += 1
+        if self._summary_task is not None:
+            self.progress.advance(self._summary_task, 1)
         self._sync_visible_tasks()
         self._update_summary()
 
@@ -113,7 +117,7 @@ class RichReporter:
             for result in issues:
                 if result.error:
                     self.progress.console.print(
-                        f"[red]error:[/red] {result.character.id}: {result.error}",
+                        f"[red]error:[/red] {escape(result.character.id)}: {escape(result.error)}",
                         overflow="fold",
                     )
                 missing_counts = Counter(item.kind for item in result.referenced_missing)
@@ -141,15 +145,15 @@ class RichReporter:
 
     def warning(self, message: str) -> None:
         if not self.quiet:
-            self.progress.console.print(f"[yellow]warning:[/yellow] {message}", overflow="fold")
+            self.progress.console.print(f"[yellow]warning:[/yellow] {escape(message)}", overflow="fold")
 
     def info(self, message: str) -> None:
         if not self.quiet:
-            self.progress.console.print(message, overflow="fold")
+            self.progress.console.print(escape(message), overflow="fold")
 
     def verbose(self, message: str) -> None:
         if self.verbose_enabled and not self.quiet:
-            self.progress.console.print(f"[dim]{message}[/dim]", overflow="fold")
+            self.progress.console.print(f"[dim]{escape(message)}[/dim]", overflow="fold")
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
         if not sys.stdin.isatty():
@@ -162,7 +166,7 @@ class RichReporter:
             self._started = False
 
     def fatal(self, message: str) -> None:
-        self.error_console.print(f"[red]error:[/red] {message}", overflow="fold")
+        self.error_console.print(f"[red]error:[/red] {escape(message)}", overflow="fold")
 
     def _sync_visible_tasks(self) -> None:
         for character_id, task in list(self._tasks.items()):
@@ -177,14 +181,21 @@ class RichReporter:
                 break
             self._tasks[character_id] = self.progress.add_task(character_id, total=None, phase=phase)
 
+    def _task_completed(self, task_id: TaskID) -> int:
+        for task in self.progress.tasks:
+            if task.id == task_id:
+                return int(task.completed)
+        return 0
+
     def _update_summary(self) -> None:
         if self._summary_task is None:
             return
-        queued = max(0, self._total - self._completed - len(self._active))
+        completed = self._task_completed(self._summary_task)
+        queued = max(0, self._total - completed - len(self._active))
         hidden = max(0, len(self._active) - len(self._tasks))
         failed = f"[red]{self._failed} failed[/red]" if self._failed else "0 failed"
         parts = [
-            f"{self._completed}/{self._total} done",
+            f"{completed}/{self._total} done",
             f"{len(self._active)} active",
             f"{queued} queued",
             failed,

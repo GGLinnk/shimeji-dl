@@ -10,7 +10,9 @@ from typing import Annotated
 import typer
 
 from .core.engine import DownloadEngine, DownloadOptions
-from .core.http import HttpClient, HttpError
+from .core.error_description import describe_error
+from .core.http import HttpClient
+from .core.http_error import HttpError
 from .core.interfaces import SourceAdapter
 from .core.models import CharacterRef, CharacterResult
 from .formats.shimeji_xml import ShimejiXmlFormat
@@ -102,6 +104,7 @@ async def _run(**options: object) -> int:
         retries=int(options["retries"]),
         user_agent=user_agent,
     ) as client:
+        extraction_exit_code: int | None = None
         try:
             characters = await _extract_targets(
                 client,
@@ -110,12 +113,15 @@ async def _run(**options: object) -> int:
                 reporter,
                 assume_yes=bool(options["yes"]),
             )
-        except UserCancelled:
+        except* UserCancelled:
             reporter.info("Cancelled.")
-            return 0
-        except (ValueError, HttpError) as exc:
-            reporter.fatal(str(exc))
-            return 2
+            extraction_exit_code = 0
+        except* (ValueError, HttpError) as eg:
+            for error in eg.exceptions:
+                reporter.fatal(describe_error(error))
+            extraction_exit_code = 2
+        if extraction_exit_code is not None:
+            return extraction_exit_code
 
         output_root = Path(options["output"])
         image_root = _image_output_root(output_root)
@@ -195,11 +201,13 @@ async def _extract_targets(
             raise UserCancelled()
         resolved.append((source, target))
 
-    async def extract_one(source: SourceAdapter, target: str):
+    async def extract_one(source: SourceAdapter, target: str) -> list[CharacterRef]:
         reporter.extraction(source.key, target)
         return await source.extract(client, target)
 
-    groups = await asyncio.gather(*(extract_one(source, target) for source, target in resolved))
+    async with asyncio.TaskGroup() as group:
+        tasks = [group.create_task(extract_one(source, target)) for source, target in resolved]
+    groups = [task.result() for task in tasks]
     unique: list[CharacterRef] = []
     seen: set[tuple[str, str]] = set()
     for group in groups:

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from urllib.parse import urljoin, urlsplit
 
+import httpx
+import msgspec
 from lxml import html
 
 from ...core.http import HttpClient
+from ...core.http_error import HttpError
 from ...core.models import (
     AssetRef,
     CharacterRef,
@@ -17,6 +19,20 @@ from ...core.models import (
     SpriteRegion,
 )
 from ...core.storage import normalize_asset_ref, quote_asset_path
+from .manifest_rejection import (
+    InvalidSpritePath,
+    InvalidSpriteRegion,
+    SpriteAbsoluteUrlPresent,
+    SpriteRejection,
+    SpriteWrongSuffix,
+)
+from .manifest_schema import (
+    BoundedConfigXml,
+    BoundedUrl,
+    ManifestEnvelope,
+    ManifestMetadataWire,
+    SpriteRegionWire,
+)
 
 SITE = "https://shimejis.xyz"
 DIRECTORY = f"{SITE}/directory"
@@ -70,29 +86,41 @@ class ShimejisXYZSource:
             return await self._extract_pack(client, f"{SITE}{path}")
         raise ValueError(f"unsupported shimejis.xyz URL: {target}")
 
-    async def fetch_manifest(self, client: HttpClient, character: CharacterRef) -> SourceManifest | None:
+    async def fetch_manifest(
+        self,
+        client: HttpClient,
+        character: CharacterRef,
+        *,
+        report_rejection: Callable[[str], None] = lambda message: None,
+    ) -> SourceManifest | None:
         url = f"{SITE}/api/shimeji/{character.id}/configuration"
         response = await client.get(url, optional=True, headers=self.request_headers())
         if response is None:
+            report_rejection(f"manifest unavailable: {url}")
             return None
 
         try:
-            payload = json.loads(response.content)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            envelope = msgspec.json.decode(response.content, type=ManifestEnvelope)
+        except msgspec.ValidationError as exc:
+            report_rejection(f"manifest envelope has the wrong shape: {url}: {exc}")
             return None
-        if not isinstance(payload, dict):
+        except msgspec.DecodeError as exc:
+            report_rejection(f"manifest is not valid JSON: {url}: {exc}")
             return None
 
-        configs = {
-            filename: value.encode("utf-8")
-            for filename in self.config_names
-            if isinstance((value := payload.get(filename.removesuffix(".xml"))), str)
+        config_fields: dict[str, msgspec.Raw] = {
+            "actions.xml": envelope.actions,
+            "behaviors.xml": envelope.behaviors,
+            "info.xml": envelope.info,
         }
-        sprites = _parse_sprites(payload.get("sprites"))
-        spritesheet_url = _asset_url(payload.get("spritesheet"))
-        metadata = payload.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
+        configs = {
+            filename: text.encode("utf-8")
+            for filename in self.config_names
+            if (text := _decode_config_text(config_fields[filename], filename, report_rejection)) is not None
+        }
+        sprites = _parse_sprites(envelope.sprites, report_rejection)
+        spritesheet_url = _asset_url(_decode_spritesheet_url(envelope.spritesheet, report_rejection))
+        metadata = _decode_metadata(envelope.metadata, report_rejection)
 
         if spritesheet_url:
             origin = _origin(spritesheet_url)
@@ -102,6 +130,7 @@ class ShimejisXYZSource:
                 )
 
         if not configs and not sprites:
+            report_rejection(f"manifest carries neither a usable config nor a sprite: {url}")
             return None
         return SourceManifest(
             source_url=response.url,
@@ -122,7 +151,8 @@ class ShimejisXYZSource:
 
     def asset_candidates(self, character: CharacterRef, ref: AssetRef) -> list[str]:
         if ref.absolute_url:
-            return [ref.absolute_url]
+            trusted = _asset_url(ref.absolute_url)
+            return [trusted] if trusted else []
 
         roots = self._roots(character)
         if ref.path.lower().startswith("sound/"):
@@ -156,8 +186,21 @@ class ShimejisXYZSource:
         packs = extract_pack_urls_from_html(page)
         if not packs:
             raise ValueError(f"no packs found in directory: {DIRECTORY}")
-        groups = await asyncio.gather(*(self._extract_pack(client, url) for url in packs))
+        async with asyncio.TaskGroup() as task_group:
+            tasks = [task_group.create_task(self._extract_pack_or_skip(client, url)) for url in packs]
+        groups = [task.result() for task in tasks]
         return _unique_characters(character for group in groups for character in group)
+
+    async def _extract_pack_or_skip(self, client: HttpClient, url: str) -> list[CharacterRef]:
+        """Fetch one pack page as part of a whole-catalogue scan.
+
+        A single pack page failing to fetch or decode must cost that pack,
+        never the sibling packs already running in the same task group.
+        """
+        try:
+            return await self._extract_pack(client, url)
+        except HttpError:
+            return []
 
     async def _extract_pack(self, client: HttpClient, url: str) -> list[CharacterRef]:
         page = await client.get_text(url, headers=self.request_headers())
@@ -238,40 +281,87 @@ def _unique_characters(characters: Iterable[CharacterRef]) -> list[CharacterRef]
 
 
 def _origin(url: str) -> str:
-    parsed = urlsplit(url)
-    return f"{parsed.scheme}://{parsed.netloc}"
+    parsed = httpx.URL(url)
+    port_suffix = "" if parsed.port is None else f":{parsed.port}"
+    return f"{parsed.scheme}://{parsed.host}{port_suffix}"
 
 
 def _asset_url(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    parsed = urlsplit(value)
-    if parsed.scheme != "https" or _origin(value) not in ASSET_HOSTS:
+    try:
+        parsed = httpx.URL(value)
+    except httpx.InvalidURL:
+        return None
+    if parsed.scheme != "https" or parsed.userinfo or _origin(value) not in ASSET_HOSTS:
         return None
     return value
 
 
-def _parse_sprites(value: object) -> dict[str, SpriteRegion]:
-    if not isinstance(value, dict):
+def _decode_config_text(
+    raw: msgspec.Raw,
+    field_name: str,
+    report_rejection: Callable[[str], None],
+) -> str | None:
+    try:
+        return msgspec.json.decode(raw, type=BoundedConfigXml | None)
+    except msgspec.ValidationError as exc:
+        report_rejection(f"manifest {field_name} field rejected: {exc}")
+        return None
+
+
+def _decode_spritesheet_url(raw: msgspec.Raw, report_rejection: Callable[[str], None]) -> str | None:
+    try:
+        return msgspec.json.decode(raw, type=BoundedUrl | None)
+    except msgspec.ValidationError as exc:
+        report_rejection(f"manifest spritesheet field rejected: {exc}")
+        return None
+
+
+def _decode_metadata(raw: msgspec.Raw, report_rejection: Callable[[str], None]) -> dict[str, object]:
+    try:
+        wire = msgspec.json.decode(raw, type=ManifestMetadataWire | None)
+    except msgspec.ValidationError as exc:
+        report_rejection(f"manifest metadata field rejected: {exc}")
         return {}
+    if wire is None:
+        return {}
+    return {name: value for name, value in msgspec.structs.asdict(wire).items() if value is not None}
+
+
+def _validate_sprite_entry(key: str, raw_region: msgspec.Raw) -> SpriteRegion:
+    raw_value = bytes(raw_region)
+    normalized = normalize_asset_ref(key)
+    if normalized is None:
+        raise InvalidSpritePath(key, raw_value)
+    path, absolute_url = normalized
+    if absolute_url is not None:
+        raise SpriteAbsoluteUrlPresent(key, raw_value)
+    if not path.lower().endswith(".png"):
+        raise SpriteWrongSuffix(key, raw_value)
+    try:
+        region = msgspec.json.decode(raw_region, type=SpriteRegionWire)
+    except msgspec.ValidationError as exc:
+        raise InvalidSpriteRegion(key, raw_value) from exc
+    return SpriteRegion(path, region.x, region.y, region.width, region.height)
+
+
+def _parse_sprites(raw: msgspec.Raw, report_rejection: Callable[[str], None]) -> dict[str, SpriteRegion]:
+    try:
+        entries = msgspec.json.decode(raw, type=dict[str, msgspec.Raw] | None)
+    except msgspec.ValidationError as exc:
+        report_rejection(f"manifest sprites field is not an object: {exc}")
+        return {}
+    if entries is None:
+        return {}
+
     sprites: dict[str, SpriteRegion] = {}
-    for raw_path, raw_region in value.items():
-        if not isinstance(raw_path, str) or not isinstance(raw_region, dict):
-            continue
-        normalized = normalize_asset_ref(raw_path)
-        if normalized is None:
-            continue
-        path, absolute_url = normalized
-        if absolute_url is not None or not path.lower().endswith(".png"):
-            continue
+    for key, raw_region in entries.items():
         try:
-            x = int(raw_region["x"])
-            y = int(raw_region["y"])
-            width = int(raw_region["width"])
-            height = int(raw_region["height"])
-        except (KeyError, TypeError, ValueError):
+            region = _validate_sprite_entry(key, raw_region)
+        except SpriteRejection as rejection:
+            cause = f": {rejection.__cause__}" if rejection.__cause__ is not None else ""
+            report_rejection(f"{rejection}{cause}")
             continue
-        if min(x, y) < 0 or min(width, height) <= 0:
-            continue
-        sprites[path] = SpriteRegion(path, x, y, width, height)
+        sprites[region.path] = region
     return sprites

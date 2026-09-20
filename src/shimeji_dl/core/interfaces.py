@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Protocol, runtime_checkable
 
 from .http import HttpClient
@@ -45,7 +45,13 @@ class SourceAdapter(Protocol):
 class ManifestSourceAdapter(Protocol):
     """Optional source capability for an authoritative per-character manifest."""
 
-    async def fetch_manifest(self, client: HttpClient, character: CharacterRef) -> SourceManifest | None: ...
+    async def fetch_manifest(
+        self,
+        client: HttpClient,
+        character: CharacterRef,
+        *,
+        report_rejection: Callable[[str], None] = ...,
+    ) -> SourceManifest | None: ...
 
 
 class Reporter(Protocol):

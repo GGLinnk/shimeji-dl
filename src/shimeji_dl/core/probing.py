@@ -5,8 +5,11 @@ import re
 from collections.abc import Awaitable, Callable, Iterable
 
 from .models import ProbeReport
+from .probe_tuning import probe_tuning_for_mode
 
 _NUMERIC_RE = re.compile(r"^shime([1-9][0-9]*)\.png$", re.IGNORECASE)
+
+DEFAULT_PROBE_BATCH_SIZE = 64
 
 
 def numeric_index(path: str) -> int | None:
@@ -26,11 +29,13 @@ def adaptive_quiet_span(hits: Iterable[int], mode: str, *, span_hint: int = 0) -
     largest_gap = max((right - left - 1 for left, right in zip(ordered, ordered[1:])), default=0)
     highest = ordered[-1] if ordered else 0
     bit_scale = max(1, highest.bit_length())
-    if mode == "deep":
-        base, gap_factor, position_factor, hint_factor = 128, 8, 8, 2
-    else:
-        base, gap_factor, position_factor, hint_factor = 32, 4, 4, 1
-    return max(base, (largest_gap + 1) * gap_factor, bit_scale * position_factor, span_hint * hint_factor)
+    tuning = probe_tuning_for_mode(mode)
+    return max(
+        tuning.base,
+        (largest_gap + 1) * tuning.gap_factor,
+        bit_scale * tuning.position_factor,
+        span_hint * tuning.hint_factor,
+    )
 
 
 class AdaptiveNumericProber:
@@ -41,7 +46,7 @@ class AdaptiveNumericProber:
     The algorithm only reasons about positive integer indices, making it reusable outside Shimeji sources.
     """
 
-    def __init__(self, *, mode: str = "auto", batch_size: int = 64) -> None:
+    def __init__(self, *, mode: str = "auto", batch_size: int = DEFAULT_PROBE_BATCH_SIZE) -> None:
         self.mode = mode
         self.batch_size = max(1, batch_size)
 
@@ -87,11 +92,13 @@ class AdaptiveNumericProber:
             before = set(hits)
             for cursor in range(start, end + 1, self.batch_size):
                 batch_end = min(end, cursor + self.batch_size - 1)
-                await asyncio.gather(*(one(index, phase) for index in range(cursor, batch_end + 1)))
+                async with asyncio.TaskGroup() as group:
+                    for index in range(cursor, batch_end + 1):
+                        group.create_task(one(index, phase))
             return bool(hits - before)
 
         if not hits:
-            await probe_range(1, 32 if self.mode == "deep" else 8, "fill")
+            await probe_range(1, probe_tuning_for_mode(self.mode).first_pass_span, "fill")
             if not hits:
                 report.misses = sorted(misses)
                 report.highest_tested = max(misses, default=None)
@@ -133,7 +140,9 @@ class AdaptiveNumericProber:
             for cursor in range(frontier + 1, quiet_end + 1, self.batch_size):
                 batch_end = min(quiet_end, cursor + self.batch_size - 1)
                 before_highest = max(hits)
-                await asyncio.gather(*(one(index, "quiescence") for index in range(cursor, batch_end + 1)))
+                async with asyncio.TaskGroup() as group:
+                    for index in range(cursor, batch_end + 1):
+                        group.create_task(one(index, "quiescence"))
                 if max(hits) > before_highest:
                     found_beyond = True
                     break

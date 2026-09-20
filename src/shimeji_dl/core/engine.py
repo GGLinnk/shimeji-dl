@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -9,6 +10,8 @@ from pathlib import Path
 from PIL import Image, UnidentifiedImageError
 
 from ..version import get_version
+from .asset_path_escapes_destination import AssetPathEscapesDestination
+from .error_description import describe_error
 from .http import HttpClient
 from .interfaces import ConfigFormat, ManifestSourceAdapter, Reporter, SourceAdapter
 from .models import (
@@ -28,10 +31,14 @@ from .storage import (
     collect_images,
     collect_sounds,
     compress_numbers,
+    confined_asset_path,
     is_valid_local_resource,
     looks_like_resource,
     natural_key,
 )
+
+# Bumped whenever the shape of the written metadata.json changes.
+METADATA_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +72,9 @@ class DownloadEngine:
         self.options.output.mkdir(parents=True, exist_ok=True)
         self.reporter.start(characters)
         try:
-            return await asyncio.gather(*(self._limited_download(character) for character in characters))
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(self._limited_download(character)) for character in characters]
+            return [task.result() for task in tasks]
         finally:
             self.reporter.finish()
 
@@ -83,7 +92,7 @@ class DownloadEngine:
                     referenced_missing=[],
                     probe=ProbeReport(mode=self.options.probe_mode, stop_reason="error"),
                     usable=False,
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=describe_error(exc),
                 )
                 self.reporter.character_finished(result)
                 return result
@@ -99,12 +108,12 @@ class DownloadEngine:
         manifest = await self._get_manifest(source, character)
 
         self.reporter.character_phase(character, "Config")
-        config_items = await asyncio.gather(
-            *(
-                self._get_config(source, character, name, conf_dir, manifest)
+        async with asyncio.TaskGroup() as config_group:
+            config_tasks = [
+                config_group.create_task(self._get_config(source, character, name, conf_dir, manifest))
                 for name in source.config_names
-            )
-        )
+            ]
+        config_items = [task.result() for task in config_tasks]
         configs = dict(zip(source.config_names, config_items, strict=True))
         source.prioritize(character, config_items)
 
@@ -122,9 +131,11 @@ class DownloadEngine:
         if refs:
             self.reporter.character_phase(character, "XML assets", f"{len(refs)} referenced")
             pending = [ref for ref in refs if ref.path not in atlas_paths]
-            results = await asyncio.gather(
-                *(self._download_ref(source, character, ref, dest) for ref in pending)
-            )
+            async with asyncio.TaskGroup() as ref_group:
+                ref_tasks = [
+                    ref_group.create_task(self._download_ref(source, character, ref, dest)) for ref in pending
+                ]
+            results = [task.result() for task in ref_tasks]
             for ref, success, tried_urls in results:
                 if success:
                     referenced_present.add(ref.path)
@@ -247,7 +258,7 @@ class DownloadEngine:
     ) -> SourceManifest | None:
         if not isinstance(source, ManifestSourceAdapter):
             return None
-        return await source.fetch_manifest(self.client, character)
+        return await source.fetch_manifest(self.client, character, report_rejection=self.reporter.verbose)
 
     async def _materialize_spritesheet(
         self,
@@ -258,7 +269,7 @@ class DownloadEngine:
         present = (
             set()
             if self.options.overwrite
-            else await asyncio.to_thread(_valid_manifest_paths, manifest, dest)
+            else await asyncio.to_thread(_valid_manifest_paths, manifest, dest, self.reporter.warning)
         )
         needed = {path: region for path, region in manifest.sprites.items() if path not in present}
         if not needed or not manifest.spritesheet_url:
@@ -269,19 +280,17 @@ class DownloadEngine:
             optional=True,
             headers=source.request_headers(),
         )
-        if response is None or not looks_like_resource(
-            response.content,
-            "spritesheet.png",
-            response.content_type,
-        ):
+        if response is None or not looks_like_resource(response.content, "spritesheet.png"):
             return present
 
-        extracted = await asyncio.to_thread(
+        extracted, rejected = await asyncio.to_thread(
             _extract_sprite_regions,
             response.content,
             needed,
             dest,
         )
+        for path in rejected:
+            self.reporter.warning(f"rejected sprite region path escaping destination: {path}")
         return present | extracted
 
     async def _download_ref(
@@ -291,7 +300,12 @@ class DownloadEngine:
         ref: AssetRef,
         dest: Path,
     ) -> tuple[AssetRef, bool, list[str]]:
-        local_path = dest.joinpath(*ref.path.split("/"))
+        try:
+            local_path = confined_asset_path(dest, ref.path)
+        except AssetPathEscapesDestination:
+            self.reporter.warning(f"rejected asset path escaping destination: {ref.path}")
+            return ref, False, []
+
         if (
             local_path.exists()
             and not self.options.overwrite
@@ -303,7 +317,7 @@ class DownloadEngine:
         for url in source.asset_candidates(character, ref):
             tried.append(url)
             response = await self.client.get(url, optional=True, headers=source.request_headers())
-            if response is None or not looks_like_resource(response.content, ref.path, response.content_type):
+            if response is None or not looks_like_resource(response.content, ref.path):
                 continue
             await asyncio.to_thread(atomic_write, local_path, response.content)
             return ref, True, tried
@@ -338,7 +352,7 @@ class DownloadEngine:
             key=natural_key,
         )
         metadata = {
-            "schema_version": 6,
+            "schema_version": METADATA_SCHEMA_VERSION,
             "tool": {"name": "shimeji-dl", "version": get_version()},
             "source_adapter": result.character.source,
             "id": result.character.id,
@@ -442,8 +456,9 @@ def _extract_sprite_regions(
     spritesheet: bytes,
     regions: dict[str, SpriteRegion],
     dest: Path,
-) -> set[str]:
+) -> tuple[set[str], list[str]]:
     extracted: set[str] = set()
+    rejected: list[str] = []
     try:
         with Image.open(BytesIO(spritesheet)) as image:
             image.load()
@@ -453,22 +468,36 @@ def _extract_sprite_regions(
                 bottom = region.y + region.height
                 if right > sheet_width or bottom > sheet_height:
                     continue
+                try:
+                    target = confined_asset_path(dest, path)
+                except AssetPathEscapesDestination:
+                    rejected.append(path)
+                    continue
                 sprite = image.crop((region.x, region.y, right, bottom))
                 output = BytesIO()
                 sprite.save(output, format="PNG", optimize=False)
-                atomic_write(dest.joinpath(*path.split("/")), output.getvalue())
+                atomic_write(target, output.getvalue())
                 extracted.add(path)
     except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
-        return set()
-    return extracted
+        return extracted, rejected
+    return extracted, rejected
 
 
-def _valid_manifest_paths(manifest: SourceManifest, dest: Path) -> set[str]:
-    return {
-        path
-        for path in manifest.sprites
-        if is_valid_local_resource(dest.joinpath(*path.split("/")))
-    }
+def _valid_manifest_paths(
+    manifest: SourceManifest,
+    dest: Path,
+    report_rejection: Callable[[str], None],
+) -> set[str]:
+    valid: set[str] = set()
+    for path in manifest.sprites:
+        try:
+            target = confined_asset_path(dest, path)
+        except AssetPathEscapesDestination:
+            report_rejection(f"rejected sprite region path escaping destination: {path}")
+            continue
+        if is_valid_local_resource(target):
+            valid.add(path)
+    return valid
 
 
 def _manifest_metadata(result: CharacterResult) -> dict[str, object]:
