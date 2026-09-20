@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from typer.testing import CliRunner
+from rich.text import Text
+from typer.testing import CliRunner, Result
 
 from shimeji_dl.cli import app
 from shimeji_dl.cli import archive as archive_module
@@ -10,6 +11,11 @@ from shimeji_dl.cli.archive_options import ArchiveCommandOptions
 from shimeji_dl.cli.download_options import DownloadCommandOptions
 
 runner = CliRunner()
+
+
+def plain_output(result: Result) -> str:
+    """CliRunner output with terminal styling stripped."""
+    return Text.from_ansi(result.output).plain
 
 
 @pytest.fixture
@@ -73,7 +79,7 @@ def test_download_with_no_target_reports_the_missing_argument(recorded_calls: li
     result = runner.invoke(app, ["download"], prog_name="shimeji-dl")
 
     assert result.exit_code == 2
-    assert "Missing argument" in result.output
+    assert "Missing argument" in plain_output(result)
     assert not recorded_calls
 
 
@@ -81,16 +87,19 @@ def test_unknown_option_is_reported_inside_the_download_context(recorded_calls: 
     result = runner.invoke(app, ["--bogus"], prog_name="shimeji-dl")
 
     assert result.exit_code != 0
-    assert "shimeji-dl download" in result.output
+    assert "shimeji-dl download" in plain_output(result)
     assert not recorded_calls
 
 
 def test_bare_invocation_shows_group_help(recorded_calls: list[tuple[str, object]]) -> None:
     result = runner.invoke(app, [], prog_name="shimeji-dl")
 
-    assert "Usage: shimeji-dl" in result.output
-    assert "download" in result.output
-    assert "archive" in result.output
+    # no_args_is_help exits as a usage error, not a plain zero-exit help.
+    assert result.exit_code == 2
+    output = plain_output(result)
+    assert "Usage: shimeji-dl" in output
+    assert "download" in output
+    assert "archive" in output
     assert not recorded_calls
 
 
@@ -98,8 +107,9 @@ def test_group_help_flag_lists_both_commands(recorded_calls: list[tuple[str, obj
     result = runner.invoke(app, ["--help"], prog_name="shimeji-dl")
 
     assert result.exit_code == 0
-    assert "download" in result.output
-    assert "archive" in result.output
+    output = plain_output(result)
+    assert "download" in output
+    assert "archive" in output
     assert not recorded_calls
 
 
@@ -107,7 +117,7 @@ def test_download_help_flag_shows_only_download_usage(recorded_calls: list[tuple
     result = runner.invoke(app, ["download", "--help"], prog_name="shimeji-dl")
 
     assert result.exit_code == 0
-    assert "shimeji-dl download" in result.output
+    assert "shimeji-dl download" in plain_output(result)
     assert not recorded_calls
 
 
@@ -115,7 +125,7 @@ def test_archive_help_flag_shows_only_archive_usage(recorded_calls: list[tuple[s
     result = runner.invoke(app, ["archive", "--help"], prog_name="shimeji-dl")
 
     assert result.exit_code == 0
-    assert "shimeji-dl archive" in result.output
+    assert "shimeji-dl archive" in plain_output(result)
     assert not recorded_calls
 
 
