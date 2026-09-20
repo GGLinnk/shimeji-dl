@@ -6,6 +6,7 @@ on:
 
 env:
   DIST_ARTIFACT_PREFIX: dist
+  TOOLCHAIN_PYTHON_VERSION: "3.14"
 
 permissions:
   contents: read
@@ -24,7 +25,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          python-version: "3.14"
+          python-version: ${{ env.TOOLCHAIN_PYTHON_VERSION }}
 
       - name: Ruff lint
         run: uv run --frozen --group dev ruff check src tests .github/scripts
@@ -36,9 +37,7 @@ jobs:
         run: uv run --frozen --group dev mypy
 
       - name: Audit dependencies
-        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
-        with:
-          inputs: .
+        run: uv run --frozen --group dev pip-audit .
 
   python_matrix:
     name: Derive Python matrix
@@ -56,7 +55,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          python-version: "3.14"
+          python-version: ${{ env.TOOLCHAIN_PYTHON_VERSION }}
 
       - name: Derive supported Python versions from classifiers
         id: derive
@@ -111,7 +110,7 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          python-version: "3.14"
+          python-version: ${{ env.TOOLCHAIN_PYTHON_VERSION }}
 
       - name: Verify lockfile
         run: uv lock --check
@@ -130,6 +129,9 @@ jobs:
 
       - name: Smoke test distributions
         run: uv run --locked python .github/scripts/smoke_dist.py
+
+      - name: Verify byte-reproducibility from two fresh clones
+        run: uv run --locked python .github/scripts/reproducible_build.py
 
       - name: Generate SLSA provenance
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1

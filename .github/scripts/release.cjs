@@ -25,17 +25,6 @@ async function getMainSha(github, context) {
   return response.data.object.sha;
 }
 
-async function assertTagAbsent(github, context, tag) {
-  const { owner, repo } = context.repo;
-  try {
-    await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
-  } catch (error) {
-    if (error.status === 404) return;
-    throw error;
-  }
-  fail(`Tag ${tag} already exists`);
-}
-
 async function assertTaggedCommitBelongsToMain(github, context, sha) {
   const { owner, repo } = context.repo;
   const response = await github.rest.repos.compareCommitsWithBasehead({
@@ -105,7 +94,6 @@ async function qualify({ github, context, core }) {
       if (sha !== mainSha) {
         fail(`Manual release SHA ${sha} is not current main ${mainSha}`);
       }
-      await assertTagAbsent(github, context, tag);
     } else if (mode === 'publish') {
       await assertTaggedCommitBelongsToMain(github, context, sha);
     } else {
@@ -125,13 +113,17 @@ async function createTagAndDispatch({ github, context, core }) {
     if (!tag) fail('RELEASE_TAG is missing');
 
     const { owner, repo } = context.repo;
-    await assertTagAbsent(github, context, tag);
-    await github.rest.git.createRef({
-      owner,
-      repo,
-      ref: `refs/tags/${tag}`,
-      sha: context.sha,
-    });
+    try {
+      await github.rest.git.createRef({
+        owner,
+        repo,
+        ref: `refs/tags/${tag}`,
+        sha: context.sha,
+      });
+    } catch (error) {
+      if (error.status === 422) fail(`Tag ${tag} already exists`);
+      throw error;
+    }
     core.info(`Created ${tag} at ${context.sha}`);
 
     await github.rest.actions.createWorkflowDispatch({

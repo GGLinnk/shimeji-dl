@@ -8,6 +8,7 @@ on:
 
 env:
   DIST_ARTIFACT_PREFIX: dist
+  TOOLCHAIN_PYTHON_VERSION: "3.14"
 
 permissions: {}
 
@@ -36,11 +37,11 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          python-version: "3.14"
+          python-version: ${{ env.TOOLCHAIN_PYTHON_VERSION }}
 
       - name: Resolve release metadata
         id: release
-        run: uv run --no-project --with packaging python .github/scripts/release.py
+        run: uv run --frozen --group dev python .github/scripts/release.py
 
   qualify:
     name: Qualify CI artifact
