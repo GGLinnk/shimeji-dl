@@ -1,45 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
 from dataclasses import replace
-from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from .core.engine import DownloadEngine, DownloadOptions
-from .core.error_description import describe_error
-from .core.http import HttpClient
-from .core.http_error import HttpError
-from .core.interfaces import SourceAdapter
-from .core.models import CharacterRef, CharacterResult
-from .formats.shimeji_xml import ShimejiXmlFormat
-from .sources import default_sources
-from .ui import RichReporter
-from .version import get_version
-
-app = typer.Typer(add_completion=False, no_args_is_help=True, rich_markup_mode="rich")
-
-
-class ProbeMode(str, Enum):
-    AUTO = "auto"
-    OFF = "off"
-    DEEP = "deep"
-
-
-class UserCancelled(RuntimeError):
-    pass
+from ..archive import ArchiveRequest, ArchivingRefusal, build_archive
+from ..core.engine import DownloadEngine, DownloadOptions
+from ..core.error_description import describe_error
+from ..core.http import HttpClient
+from ..core.http_error import HttpError
+from ..core.interfaces import SourceAdapter
+from ..core.models import CharacterRef, CharacterResult
+from ..formats.shimeji_xml import ShimejiXmlFormat
+from ..sources.shimejis_xyz.target_vocabulary import pack_slug
+from ..sources.target.registry import default_sources
+from ..sources.target.target_kind import TargetKind
+from ..sources.target.target_vocabularies import reduce_target
+from ..ui import RichReporter
+from ..version import get_version
+from .download_options import DownloadCommandOptions
+from .output_layout import image_output_root
+from .probe_mode import ProbeMode
+from .user_cancelled import UserCancelled
 
 
-def _version_callback(value: bool) -> None:
-    if value:
-        typer.echo(f"shimeji-dl {get_version()}")
-        raise typer.Exit()
-
-
-@app.command()
 def download(
     targets: Annotated[list[str], typer.Argument(help="Pack URL, character URL, site URL, or supported source identifier.")],
     output: Annotated[
@@ -65,53 +52,90 @@ def download(
     ] = False,
     strict: Annotated[bool, typer.Option(help="Fail if a character is unusable or an XML-referenced asset is missing.")] = False,
     metadata: Annotated[bool, typer.Option("--metadata/--no-metadata", help="Write metadata.json.")] = True,
-    archive: Annotated[bool, typer.Option(help="Create <output>.zip after downloading.")] = False,
+    archive: Annotated[
+        bool,
+        typer.Option(help="Archive each target into the output root after downloading."),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show probe and URL details.")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Suppress progress output.")] = False,
-    version: Annotated[bool | None, typer.Option("--version", callback=_version_callback, is_eager=True)] = None,
 ) -> None:
-    raise typer.Exit(
-        asyncio.run(
-            _run(
-                targets=targets,
-                output=output,
-                jobs=jobs,
-                connections=connections,
-                timeout=timeout,
-                retries=retries,
-                probe=probe.value,
-                overwrite=overwrite,
-                retry=retry,
-                yes=yes,
-                strict=strict,
-                metadata=metadata,
-                archive=archive,
-                verbose=verbose,
-                quiet=quiet,
-            )
-        )
+    """Download one or more Shimeji targets into a Shimeji-compatible output root."""
+    options = _build_download_options(
+        targets=targets,
+        output=output,
+        jobs=jobs,
+        connections=connections,
+        timeout=timeout,
+        retries=retries,
+        probe=probe,
+        overwrite=overwrite,
+        retry=retry,
+        yes=yes,
+        strict=strict,
+        metadata=metadata,
+        archive=archive,
+        verbose=verbose,
+        quiet=quiet,
+    )
+    raise typer.Exit(asyncio.run(_run_download(options)))
+
+
+def _build_download_options(
+    *,
+    targets: list[str],
+    output: Path,
+    jobs: int,
+    connections: int,
+    timeout: float,
+    retries: int,
+    probe: ProbeMode,
+    overwrite: bool,
+    retry: bool,
+    yes: bool,
+    strict: bool,
+    metadata: bool,
+    archive: bool,
+    verbose: bool,
+    quiet: bool,
+) -> DownloadCommandOptions:
+    return DownloadCommandOptions(
+        targets=tuple(targets),
+        output=output,
+        jobs=jobs,
+        connections=connections,
+        timeout=timeout,
+        retries=retries,
+        probe=probe,
+        overwrite=overwrite,
+        retry=retry,
+        yes=yes,
+        strict=strict,
+        metadata=metadata,
+        archive=archive,
+        verbose=verbose,
+        quiet=quiet,
     )
 
 
-async def _run(**options: object) -> int:
-    reporter = RichReporter(quiet=bool(options["quiet"]), verbose=bool(options["verbose"]))
+async def _run_download(options: DownloadCommandOptions) -> int:
+    reporter = RichReporter(quiet=options.quiet, verbose=options.verbose)
     sources = default_sources()
     user_agent = f"shimeji-dl/{get_version()}"
 
     async with HttpClient(
-        connections=int(options["connections"]),
-        timeout=float(options["timeout"]),
-        retries=int(options["retries"]),
+        connections=options.connections,
+        timeout=options.timeout,
+        retries=options.retries,
         user_agent=user_agent,
     ) as client:
         extraction_exit_code: int | None = None
         try:
-            characters = await _extract_targets(
+            characters, extraction_by_target = await _extract_targets(
                 client,
                 sources,
-                list(options["targets"]),
+                list(options.targets),
                 reporter,
-                assume_yes=bool(options["yes"]),
+                assume_yes=options.yes,
             )
         except* UserCancelled:
             reporter.info("Cancelled.")
@@ -123,15 +147,14 @@ async def _run(**options: object) -> int:
         if extraction_exit_code is not None:
             return extraction_exit_code
 
-        output_root = Path(options["output"])
-        image_root = _image_output_root(output_root)
+        image_root = image_output_root(options.output)
         download_options = DownloadOptions(
             output=image_root,
-            jobs=int(options["jobs"]),
-            probe_mode=str(options["probe"]),
-            overwrite=bool(options["overwrite"]),
-            metadata=bool(options["metadata"]),
-            strict=bool(options["strict"]),
+            jobs=options.jobs,
+            probe_mode=options.probe.value,
+            overwrite=options.overwrite,
+            metadata=options.metadata,
+            strict=options.strict,
         )
         engine = DownloadEngine(
             client,
@@ -146,8 +169,8 @@ async def _run(**options: object) -> int:
         if failed and _should_retry(
             reporter,
             len(failed),
-            auto_retry=bool(options["retry"]),
-            assume_yes=bool(options["yes"]),
+            auto_retry=options.retry,
+            assume_yes=options.yes,
         ):
             reporter.info(f"Retrying {len(failed)} failed character(s)...")
             retry_engine = DownloadEngine(
@@ -160,27 +183,47 @@ async def _run(**options: object) -> int:
             retried = await retry_engine.download_all([result.character for result in failed])
             results = _merge_retry_results(results, retried)
 
-    reporter.report_results(results)
+    reporter.report_results(results, output=options.output)
     usable = sum(result.usable for result in results)
-    complete = sum(result.complete for result in results)
-    source_missing = sum(
-        any(item.kind == "source-missing" for item in result.referenced_missing)
-        for result in results
-    )
-    unusable = len(results) - usable
     strict_failures = sum(not result.strict_ok for result in results)
-    reporter.info(
-        f"Finished: {usable}/{len(results)} usable, {complete}/{len(results)} complete, "
-        f"{source_missing} source-missing, {unusable} unusable character(s). "
-        f"Output: {options['output']}"
-    )
 
-    if bool(options["archive"]):
-        archive_path = await asyncio.to_thread(_make_archive, Path(options["output"]))
-        reporter.info(f"Archive: {archive_path}")
-    if bool(options["strict"]) and strict_failures:
+    archive_failed = False
+    if options.archive:
+        archive_failed = await _archive_each_target(image_root, options.output, extraction_by_target, reporter)
+
+    if options.strict and strict_failures:
+        return 1
+    if archive_failed:
         return 1
     return 0 if usable == len(results) else 1
+
+
+async def _archive_each_target(
+    image_root: Path,
+    output_root: Path,
+    extraction_by_target: list[tuple[str, list[CharacterRef]]],
+    reporter: RichReporter,
+) -> bool:
+    """Archive one target's own result set at a time; a failed target never aborts the others."""
+    failed = False
+    for target, characters in extraction_by_target:
+        local = reduce_target(target)
+        if local is None:
+            name = target.strip()
+        elif local.kind is TargetKind.COLLECTION:
+            name = pack_slug(local.identifier)
+        else:
+            name = local.identifier
+        request = ArchiveRequest(
+            name=name,
+            characters=tuple(image_root / character.id for character in characters),
+        )
+        try:
+            await asyncio.to_thread(build_archive, image_root, output_root, request, reporter=reporter)
+        except ArchivingRefusal as exc:
+            reporter.fatal(str(exc))
+            failed = True
+    return failed
 
 
 async def _extract_targets(
@@ -190,7 +233,7 @@ async def _extract_targets(
     reporter: RichReporter,
     *,
     assume_yes: bool,
-) -> list[CharacterRef]:
+) -> tuple[list[CharacterRef], list[tuple[str, list[CharacterRef]]]]:
     resolved: list[tuple[SourceAdapter, str]] = []
     for target in targets:
         source = next((candidate for candidate in sources.values() if candidate.suitable(target)), None)
@@ -205,18 +248,23 @@ async def _extract_targets(
         reporter.extraction(source.key, target)
         return await source.extract(client, target)
 
-    async with asyncio.TaskGroup() as group:
-        tasks = [group.create_task(extract_one(source, target)) for source, target in resolved]
-    groups = [task.result() for task in tasks]
+    async with asyncio.TaskGroup() as task_group:
+        tasks = [task_group.create_task(extract_one(source, target)) for source, target in resolved]
+    character_groups = [task.result() for task in tasks]
+
+    extraction_by_target = [
+        (target, characters) for (_, target), characters in zip(resolved, character_groups, strict=True)
+    ]
+
     unique: list[CharacterRef] = []
     seen: set[tuple[str, str]] = set()
-    for group in groups:
-        for character in group:
+    for characters in character_groups:
+        for character in characters:
             key = (character.source, character.id)
             if key not in seen:
                 seen.add(key)
                 unique.append(character)
-    return unique
+    return unique, extraction_by_target
 
 
 def _should_retry(
@@ -237,13 +285,3 @@ def _merge_retry_results(
 ) -> list[CharacterResult]:
     replacements = {(result.character.source, result.character.id): result for result in retried}
     return [replacements.get((result.character.source, result.character.id), result) for result in original]
-
-
-def _image_output_root(output: Path) -> Path:
-    return output if output.name.casefold() == "img" else output / "img"
-
-
-def _make_archive(output: Path) -> Path:
-    resolved = output.resolve()
-    archive_base = resolved.parent / resolved.name
-    return Path(shutil.make_archive(str(archive_base), "zip", root_dir=resolved.parent, base_dir=resolved.name))
