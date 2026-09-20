@@ -8,6 +8,7 @@ from shimeji_dl.core.models import (
     MissingAsset,
     ProbeReport,
 )
+from shimeji_dl.sources.shimejis_xyz.manifest_rejection import InvalidSpritePath
 from shimeji_dl.ui.rich import RichReporter
 
 
@@ -79,6 +80,27 @@ def test_progress_folds_long_character_names_instead_of_ellipsis() -> None:
     assert "ellipsized" in rendered
 
 
+def test_summary_task_total_and_completed_track_real_progress() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(console=console, error_console=console)
+    characters = [CharacterRef("source", f"character-{index}", f"https://example/{index}") for index in range(3)]
+
+    reporter.start(characters)
+    summary = next(task for task in reporter.progress.tasks if task.description == "Progress")
+    assert summary.total == len(characters)
+    assert summary.completed == 0
+
+    for character in characters:
+        reporter.character_started(character)
+        reporter.character_finished(_result(character))
+
+    summary = next(task for task in reporter.progress.tasks if task.description == "Progress")
+    assert summary.completed == len(characters)
+    assert summary.total == len(characters)
+    reporter.finish()
+
+
 def test_missing_assets_are_aggregated_until_verbose_output() -> None:
     stream = StringIO()
     console = Console(file=stream, width=80, force_terminal=False)
@@ -95,3 +117,48 @@ def test_missing_assets_are_aggregated_until_verbose_output() -> None:
     rendered = stream.getvalue()
     assert "partial: 2 source-missing asset(s)" in rendered
     assert "sound/one.wav" not in rendered
+
+
+def test_verbose_output_escapes_markup_in_a_missing_asset_path() -> None:
+    """An untrusted asset path can carry rich markup syntax.
+
+    An unbalanced tag like "[/]" raises rich.errors.MarkupError out of the
+    diagnostic path unless the reporter escapes it before printing.
+    """
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(verbose=True, console=console, error_console=console)
+    character = CharacterRef("source", "partial", "https://example")
+    result = _result(character)
+    result.referenced_missing = [MissingAsset("[/]evil.png", "source-missing", ())]
+
+    reporter.report_results([result])
+
+    assert "[/]evil.png" in stream.getvalue()
+
+
+def test_verbose_output_escapes_markup_in_a_manifest_rejection_message() -> None:
+    """A raw manifest key can carry rich markup syntax.
+
+    manifest_rejection.py embeds the raw key verbatim in its message; the
+    reporter, not the rejection, is responsible for escaping it before it
+    reaches a markup-enabled console.
+    """
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(verbose=True, console=console, error_console=console)
+    rejection = InvalidSpritePath("[/]evil.png", b"null")
+
+    reporter.verbose(str(rejection))
+
+    assert "[/]evil.png" in stream.getvalue()
+
+
+def test_fatal_escapes_markup_in_the_error_message() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(console=console, error_console=console)
+
+    reporter.fatal("no source supports: [/]https://example.com")
+
+    assert "[/]https://example.com" in stream.getvalue()
