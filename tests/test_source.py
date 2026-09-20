@@ -4,12 +4,13 @@ import json
 from shimeji_dl.core.http_error import HttpError
 from shimeji_dl.core.models import AssetRef
 from shimeji_dl.core.storage import MAX_ASSET_PATH_LENGTH
-from shimeji_dl.sources.shimejis_xyz import (
+from shimeji_dl.sources.shimejis_xyz.adapter import (
     ShimejisXYZSource,
+    _asset_url,
+    _origin,
     extract_pack_urls_from_html,
     extract_slugs_from_html,
 )
-from shimeji_dl.sources.shimejis_xyz.adapter import _asset_url, _origin
 
 
 class _RecordingClient:

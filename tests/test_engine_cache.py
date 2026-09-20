@@ -2,13 +2,16 @@ import asyncio
 from io import BytesIO
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
+from shimeji_dl.core import engine as engine_module
 from shimeji_dl.core.engine import (
     DownloadEngine,
     DownloadOptions,
     _extract_sprite_regions,
 )
+from shimeji_dl.core.interfaces import ManifestSourceAdapter
 from shimeji_dl.core.models import (
     AssetRef,
     CharacterRef,
@@ -172,12 +175,61 @@ def test_extract_sprite_regions_skips_hostile_region_and_keeps_siblings(tmp_path
         "sound/effect.png": SpriteRegion("sound/effect.png", 2, 0, 2, 2),
     }
 
-    extracted, rejected = _extract_sprite_regions(buf.getvalue(), regions, dest)
+    reporter = WarningReporter()
+    extracted = _extract_sprite_regions(buf.getvalue(), regions, dest, reporter.warning)
 
     assert extracted == {"sound/effect.png"}
-    assert rejected == ["../evil.png"]
     assert (dest / "sound" / "effect.png").exists()
     assert not (tmp_path / "evil.png").exists()
+    assert len(reporter.warnings) == 1
+    assert "escaping" in reporter.warnings[0] and "../evil.png" in reporter.warnings[0]
+
+
+def test_extract_sprite_regions_reports_a_corrupt_atlas_instead_of_swallowing_it(tmp_path: Path) -> None:
+    """A corrupt atlas must surface its cause, distinct from an atlas with nothing new to extract.
+
+    `OSError`/`UnidentifiedImageError` must not produce the same empty-set result a healthy atlas produces when every region is already present: the caller must be able to tell the two apart.
+    """
+    dest = tmp_path / "character"
+    dest.mkdir()
+    regions = {"sound/effect.png": SpriteRegion("sound/effect.png", 0, 0, 2, 2)}
+    reporter = WarningReporter()
+
+    extracted = _extract_sprite_regions(b"not a real image", regions, dest, reporter.warning)
+
+    assert extracted == set()
+    assert reporter.warnings and "corrupt" in reporter.warnings[0]
+
+
+def test_extract_sprite_regions_reports_a_write_failure_distinct_from_a_corrupt_atlas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disk-full or permission-denied write must never be mislabelled as a corrupt remote atlas."""
+    atlas = Image.new("RGBA", (4, 2))
+    atlas.paste((255, 0, 0, 255), (0, 0, 2, 2))
+    atlas.paste((0, 0, 255, 255), (2, 0, 4, 2))
+    buf = BytesIO()
+    atlas.save(buf, format="PNG")
+
+    dest = tmp_path / "character"
+    dest.mkdir()
+    regions = {
+        "shime1.png": SpriteRegion("shime1.png", 0, 0, 2, 2),
+        "shime2.png": SpriteRegion("shime2.png", 2, 0, 2, 2),
+    }
+
+    def _raise(target: Path, data: bytes) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(engine_module, "atomic_write", _raise)
+    reporter = WarningReporter()
+
+    extracted = _extract_sprite_regions(buf.getvalue(), regions, dest, reporter.warning)
+
+    assert extracted == set()
+    assert len(reporter.warnings) == 2
+    assert all("shime" in warning and "corrupt" not in warning for warning in reporter.warnings)
 
 
 class AtlasResponse:
@@ -229,9 +281,117 @@ def test_materialize_spritesheet_warns_on_rejected_region_without_aborting(tmp_p
 
     assert present == {"sound/effect.png"}
     assert client.calls == 1
-    assert reporter.warnings and "../evil.png" in reporter.warnings[0]
+    assert len(reporter.warnings) == 1
+    assert "escaping" in reporter.warnings[0] and "../evil.png" in reporter.warnings[0]
     assert (dest / "sound" / "effect.png").exists()
     assert not (tmp_path / "evil.png").exists()
+
+
+def test_materialize_spritesheet_reports_an_escaping_key_exactly_once_without_overwrite(tmp_path: Path) -> None:
+    """The `overwrite=False` pre-check owns the escape report and removes the key from what is still needed.
+
+    A key `_valid_manifest_paths` rejects must never reach `_extract_sprite_regions`, which would otherwise reprocess it and report the same escape a second time; here nothing remains needed, so the spritesheet is never even fetched.
+    """
+    dest = tmp_path / "character"
+    dest.mkdir()
+    manifest = SourceManifest(
+        source_url="https://example/character",
+        authoritative=True,
+        spritesheet_url="https://example/spritesheet.png",
+        sprites={"../evil.png": SpriteRegion("../evil.png", 0, 0, 2, 2)},
+    )
+    client = SpritesheetClient(b"unused")
+    reporter = WarningReporter()
+    engine = DownloadEngine(
+        client,
+        DownloadOptions(output=tmp_path, overwrite=False),
+        sources={"source": Source()},
+        config_format=Config(),
+        reporter=reporter,
+    )
+
+    present = asyncio.run(engine._materialize_spritesheet(Source(), manifest, dest))
+
+    assert present == set()
+    assert client.calls == 0
+    assert len(reporter.warnings) == 1
+    assert "escaping" in reporter.warnings[0] and "../evil.png" in reporter.warnings[0]
+
+
+def test_materialize_spritesheet_reports_an_escaping_key_exactly_once_with_overwrite(tmp_path: Path) -> None:
+    """`overwrite=True` skips the separate `_valid_manifest_paths` pre-check entirely.
+
+    `_extract_sprite_regions`'s own escape arm is then the only site that ever sees this key, so it must still report exactly once on its own.
+    """
+    atlas = Image.new("RGBA", (2, 2))
+    atlas.paste((255, 0, 0, 255), (0, 0, 2, 2))
+    buf = BytesIO()
+    atlas.save(buf, format="PNG")
+
+    dest = tmp_path / "character"
+    dest.mkdir()
+    manifest = SourceManifest(
+        source_url="https://example/character",
+        authoritative=True,
+        spritesheet_url="https://example/spritesheet.png",
+        sprites={"../evil.png": SpriteRegion("../evil.png", 0, 0, 2, 2)},
+    )
+    client = SpritesheetClient(buf.getvalue())
+    reporter = WarningReporter()
+    engine = DownloadEngine(
+        client,
+        DownloadOptions(output=tmp_path, overwrite=True),
+        sources={"source": Source()},
+        config_format=Config(),
+        reporter=reporter,
+    )
+
+    present = asyncio.run(engine._materialize_spritesheet(Source(), manifest, dest))
+
+    assert present == set()
+    assert len(reporter.warnings) == 1
+    assert "escaping" in reporter.warnings[0] and "../evil.png" in reporter.warnings[0]
+
+
+def test_materialize_spritesheet_reports_a_write_failure_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write failure must be reported once, at its own site, never relabeled as an escaping path."""
+    atlas = Image.new("RGBA", (2, 2))
+    atlas.paste((255, 0, 0, 255), (0, 0, 2, 2))
+    buf = BytesIO()
+    atlas.save(buf, format="PNG")
+
+    dest = tmp_path / "character"
+    dest.mkdir()
+    manifest = SourceManifest(
+        source_url="https://example/character",
+        authoritative=True,
+        spritesheet_url="https://example/spritesheet.png",
+        sprites={"shime1.png": SpriteRegion("shime1.png", 0, 0, 2, 2)},
+    )
+    client = SpritesheetClient(buf.getvalue())
+    reporter = WarningReporter()
+    engine = DownloadEngine(
+        client,
+        DownloadOptions(output=tmp_path, overwrite=False),
+        sources={"source": Source()},
+        config_format=Config(),
+        reporter=reporter,
+    )
+
+    def _raise(target: Path, data: bytes) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(engine_module, "atomic_write", _raise)
+
+    present = asyncio.run(engine._materialize_spritesheet(Source(), manifest, dest))
+
+    assert present == set()
+    assert len(reporter.warnings) == 1
+    assert "shime1.png" in reporter.warnings[0]
+    assert "escaping" not in reporter.warnings[0]
 
 
 class FailingSpritesheetClient:
@@ -246,9 +406,7 @@ class FailingSpritesheetClient:
 def test_materialize_spritesheet_reports_escaping_key_even_when_fetch_fails(tmp_path: Path) -> None:
     """The already-valid-paths pre-check must report a confinement rejection too.
 
-    When the spritesheet fetch fails, _extract_sprite_regions's own
-    rejection-reporting loop never runs, so _valid_manifest_paths is the
-    only site that ever sees this manifest's escaping key.
+    The pre-check reports and excludes the escaping key before any fetch decision is made, so its report must survive a later fetch failure for this manifest's other, still-needed key.
     """
     dest = tmp_path / "character"
     dest.mkdir()
@@ -256,7 +414,10 @@ def test_materialize_spritesheet_reports_escaping_key_even_when_fetch_fails(tmp_
         source_url="https://example/character",
         authoritative=True,
         spritesheet_url="https://example/spritesheet.png",
-        sprites={"../evil.png": SpriteRegion("../evil.png", 0, 0, 2, 2)},
+        sprites={
+            "../evil.png": SpriteRegion("../evil.png", 0, 0, 2, 2),
+            "sound/effect.png": SpriteRegion("sound/effect.png", 2, 0, 2, 2),
+        },
     )
     client = FailingSpritesheetClient()
     reporter = WarningReporter()
@@ -272,7 +433,8 @@ def test_materialize_spritesheet_reports_escaping_key_even_when_fetch_fails(tmp_
 
     assert present == set()
     assert client.calls == 1
-    assert reporter.warnings and "../evil.png" in reporter.warnings[0]
+    assert len(reporter.warnings) == 1
+    assert "escaping" in reporter.warnings[0] and "../evil.png" in reporter.warnings[0]
 
 
 class ProbeSource(Source):
@@ -322,6 +484,60 @@ def test_probe_reuses_hits_but_rechecks_misses_on_every_scan(tmp_path: Path) -> 
     assert "https://example/shime2.png" in second_urls
 
 
+class RejectingManifestSource(Source, ManifestSourceAdapter):
+    async def fetch_manifest(self, client, character, *, report_rejection=lambda message: None):
+        report_rejection("manifest field rejected: test")
+        return None
+
+
+def test_get_manifest_reports_rejections_through_the_warning_surface(tmp_path: Path) -> None:
+    """A manifest rejection must land on the same surface as every other per-item rejection.
+
+    `_get_manifest` must wire `report_rejection` to the same always-visible warning surface every other per-item rejection (an escaping asset path, a corrupt atlas) uses, never the verbose-only surface.
+    """
+    client = Client()
+    reporter = WarningReporter()
+    engine = DownloadEngine(
+        client,
+        DownloadOptions(output=tmp_path, overwrite=False),
+        sources={"source": RejectingManifestSource()},
+        config_format=Config(),
+        reporter=reporter,
+    )
+    character = CharacterRef("source", "character", "https://example/character")
+
+    manifest = asyncio.run(engine._get_manifest(RejectingManifestSource(), character))
+
+    assert manifest is None
+    assert reporter.warnings == ["manifest field rejected: test"]
+
+
+class LookalikeSource(Source):
+    """Carries a `fetch_manifest` attribute without declaring the capability.
+
+    Never inherits from `ManifestSourceAdapter`, unlike RejectingManifestSource.
+    """
+
+    async def fetch_manifest(self, client, character, *, report_rejection=lambda message: None):
+        raise AssertionError("must never be called: the source never declared this capability")
+
+
+def test_get_manifest_ignores_a_same_named_attribute_that_never_declared_the_capability(
+    tmp_path: Path,
+) -> None:
+    """A same-named attribute is not the capability: only real inheritance is.
+
+    The capability check must be nominal, so an unrelated method that happens to share the name is never mistaken for it.
+    """
+    client = Client()
+    engine = make_engine(tmp_path, client, overwrite=False)
+    character = CharacterRef("source", "character", "https://example/character")
+
+    manifest = asyncio.run(engine._get_manifest(LookalikeSource(), character))
+
+    assert manifest is None
+
+
 def test_source_manifest_capability_is_optional(tmp_path: Path) -> None:
     client = Client()
     engine = make_engine(tmp_path, client, overwrite=False)
@@ -367,7 +583,7 @@ def test_source_manifest_materializes_atlas_and_classifies_source_misses(tmp_pat
             self.urls.append(url)
             return AtlasResponse() if url.endswith("spritesheet.png") else None
 
-    class ManifestSource:
+    class ManifestSource(ManifestSourceAdapter):
         key = "source"
         config_names = ("actions.xml", "behaviors.xml", "info.xml")
 

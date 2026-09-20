@@ -14,6 +14,7 @@ from shimeji_dl.core.storage import (
     looks_like_resource,
     normalize_asset_ref,
     normalize_resource_ref,
+    validate_archive_name,
 )
 
 
@@ -27,6 +28,26 @@ def test_normalize_resource_ref_supports_shimeji_sounds() -> None:
     assert normalize_resource_ref("foo.wav") == ("sound/foo.wav", None)
     assert normalize_resource_ref("sound/effect.wav") == ("sound/effect.wav", None)
     assert normalize_resource_ref("/img/nested/foo.png") == ("nested/foo.png", None)
+
+
+def test_validate_archive_name_accepts_a_plain_identifier() -> None:
+    assert validate_archive_name("undertale") == "undertale"
+
+
+@pytest.mark.parametrize(
+    "hostile_name",
+    [
+        "..",
+        ".",
+        "../escape",
+        "a/b",
+        "a\\b",
+        "CON",
+        "x" * 300,
+    ],
+)
+def test_validate_archive_name_rejects_hostile_input(hostile_name: str) -> None:
+    assert validate_archive_name(hostile_name) is None
 
 
 def test_resource_validation_handles_images_and_audio() -> None:

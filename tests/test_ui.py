@@ -1,5 +1,7 @@
 from io import StringIO
+from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from shimeji_dl.core.models import (
@@ -47,6 +49,21 @@ def test_progress_shows_only_active_viewport_and_promotes_hidden_tasks() -> None
     reporter.finish()
 
 
+def test_summary_completed_count_reflects_every_finished_character() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(console=console, error_console=console)
+    characters = [CharacterRef("source", f"character-{index}", f"https://example/{index}") for index in range(3)]
+
+    reporter.start(characters)
+    for character in characters:
+        reporter.character_finished(_result(character))
+
+    summary_task = next(task for task in reporter.progress.tasks if task.description == "Progress")
+    assert "3/3 done" in summary_task.fields["phase"]
+    reporter.finish()
+
+
 def test_errors_are_reported_only_after_final_results() -> None:
     stream = StringIO()
     console = Console(file=stream, width=80, force_terminal=False)
@@ -60,7 +77,7 @@ def test_errors_are_reported_only_after_final_results() -> None:
     reporter.finish()
 
     assert "boom" not in stream.getvalue()
-    reporter.report_results([result])
+    reporter.report_results([result], output=Path("out"))
     assert "broken-character: boom" in stream.getvalue()
 
 
@@ -112,7 +129,7 @@ def test_missing_assets_are_aggregated_until_verbose_output() -> None:
         MissingAsset("sound/two.wav", "source-missing", ("https://example/two.wav",)),
     ]
 
-    reporter.report_results([result])
+    reporter.report_results([result], output=Path("out"))
 
     rendered = stream.getvalue()
     assert "partial: 2 source-missing asset(s)" in rendered
@@ -132,7 +149,7 @@ def test_verbose_output_escapes_markup_in_a_missing_asset_path() -> None:
     result = _result(character)
     result.referenced_missing = [MissingAsset("[/]evil.png", "source-missing", ())]
 
-    reporter.report_results([result])
+    reporter.report_results([result], output=Path("out"))
 
     assert "[/]evil.png" in stream.getvalue()
 
@@ -147,7 +164,7 @@ def test_verbose_output_escapes_markup_in_a_manifest_rejection_message() -> None
     stream = StringIO()
     console = Console(file=stream, width=80, force_terminal=False)
     reporter = RichReporter(verbose=True, console=console, error_console=console)
-    rejection = InvalidSpritePath("[/]evil.png", b"null")
+    rejection = InvalidSpritePath("[/]evil.png")
 
     reporter.verbose(str(rejection))
 
@@ -162,3 +179,86 @@ def test_fatal_escapes_markup_in_the_error_message() -> None:
     reporter.fatal("no source supports: [/]https://example.com")
 
     assert "[/]https://example.com" in stream.getvalue()
+
+
+def test_warning_prints_even_when_quiet() -> None:
+    """Quiet suppresses progress and informational output only; a warning always prints."""
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(quiet=True, console=console, error_console=console)
+
+    reporter.warning("unreadable metadata document: sans")
+
+    assert "unreadable metadata document: sans" in stream.getvalue()
+
+
+def test_report_results_prints_the_issue_list_even_when_quiet() -> None:
+    """The end-of-pass report has no quiet exception, per the product feature on reporting errors at the end."""
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(quiet=True, console=console, error_console=console)
+    character = CharacterRef("source", "broken-character", "https://example")
+    result = _result(character, error="boom")
+
+    reporter.report_results([result], output=Path("out"))
+
+    output = stream.getvalue()
+    assert "Issues:" in output
+    assert "broken-character: boom" in output
+
+
+def test_report_results_prints_per_item_rejections_even_when_quiet() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(quiet=True, console=console, error_console=console)
+    character = CharacterRef("source", "partial", "https://example")
+    result = _result(character)
+    result.referenced_missing = [MissingAsset("sound/one.wav", "source-missing", ("https://example/one.wav",))]
+
+    reporter.report_results([result], output=Path("out"))
+
+    assert "partial: 1 source-missing asset(s)" in stream.getvalue()
+
+
+def test_quiet_download_pass_still_prints_its_end_of_pass_report(capsys: pytest.CaptureFixture[str]) -> None:
+    """Constructed exactly as `_run_download` builds it, with no injected console, so capsys binds to its real stdout."""
+    reporter = RichReporter(quiet=True)
+    character = CharacterRef("source", "broken-character", "https://example")
+    result = _result(character, error="boom")
+
+    reporter.report_results([result], output=Path("shimeji-downloads"))
+
+    output = capsys.readouterr().out
+    assert "Issues:" in output
+    assert "broken-character: boom" in output
+    assert "Finished: 0/1 usable" in output
+
+
+def test_archive_progress_announces_and_reports_size_even_when_quiet() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(quiet=True, console=console, error_console=console)
+
+    archive_path = Path("shimeji-downloads") / "undertale.zip"
+    reporter.archive_started("undertale", 3, 42)
+    reporter.archive_entry_written(1, 3)
+    reporter.archive_finished(archive_path, 3, 2048)
+
+    output = stream.getvalue()
+    assert "undertale" in output
+    assert str(archive_path) in output
+    assert "2.0 KiB" in output
+    assert reporter._archive_progress is None
+
+
+def test_archive_progress_bar_is_created_and_torn_down_when_not_quiet() -> None:
+    stream = StringIO()
+    console = Console(file=stream, width=80, force_terminal=False)
+    reporter = RichReporter(console=console, error_console=console)
+
+    reporter.archive_started("undertale", 3, 42)
+    assert reporter._archive_progress is not None
+    reporter.archive_entry_written(2, 3)
+    reporter.archive_finished(Path("shimeji-downloads") / "undertale.zip", 3, 2048)
+
+    assert reporter._archive_progress is None
