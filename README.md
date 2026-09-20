@@ -1,5 +1,7 @@
 # shimeji-dl
 
+[![CI](https://github.com/GGLinnk/shimeji-dl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/GGLinnk/shimeji-dl/actions/workflows/ci.yml) [![Publish](https://github.com/GGLinnk/shimeji-dl/actions/workflows/publish.yml/badge.svg)](https://github.com/GGLinnk/shimeji-dl/actions/workflows/publish.yml) [![PyPI](https://img.shields.io/pypi/v/shimeji-dl)](https://pypi.org/project/shimeji-dl/) [![Python](https://img.shields.io/pypi/pyversions/shimeji-dl)](https://pypi.org/project/shimeji-dl/) [![License: MIT](https://img.shields.io/github/license/GGLinnk/shimeji-dl)](LICENSE)
+
 An asynchronous downloader that turns remote Shimeji sources into packages ready for Shimeji-ee, VShimeji, and compatible alternatives.
 
 ## Features
