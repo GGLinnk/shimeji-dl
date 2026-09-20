@@ -83,26 +83,61 @@ uv run shimeji-dl https://shimejis.xyz --yes
 
 Downloading the entire `shimejis.xyz` directory requires confirmation unless `--yes` is supplied.
 
+## Archiving
+
+`--archive` is a post-download step: it never changes what is downloaded, only whether the result is also zipped.  
+Its granularity follows the target on the command line: one archive per character, one per pack or collection, one for the whole site, each named after that target and written inside the output root.  
+A collection archive is named by its pack slug (`<identifier>-shimeji-pack.zip`), whatever form the target took: pack slug, pack URL, or display name.  
+Passing several targets in one invocation produces one archive per target.
+
+```bash
+uv run shimeji-dl https://shimejis.xyz/directory/undertale-shimeji-pack --archive
+```
+
+`shimeji-dl archive` builds an archive from what is already on disk, without any network access.  
+It accepts the same target forms as `download`: a character identifier, a collection's pack slug or display name, or a URL reduced to its local form.  
+A lowercase bare identifier always names a character.  
+A mixed-case identifier-shaped one tries a collection's exact display name first, then falls back to the character its lowercase form names.  
+Any other bare text names only a collection's exact display name, with no character fallback.  
+A collection is otherwise reached only through its pack slug, its pack URL, or that exact display name.  
+With no target, it archives the whole output root; it is the only command that produces that unnamed, global archive.
+
+```bash
+uv run shimeji-dl archive
+uv run shimeji-dl archive undertale-shimeji-pack
+```
+
+Every archive is rooted at `img/`, so extracting it directly at a Shimeji-ee, VShimeji, or compatible installation root reproduces the native layout.
+
+`download` stays the implicit default command, so an existing invocation keeps working unnamed.  
+A target named exactly like a command (`download` or `archive`) is read as that command; name `download` explicitly to reach a character or collection sharing that name.
+
+| `archive` option | Description |
+| --- | --- |
+| `-o, --output PATH` | Set the Shimeji installation or download root to archive from. |
+| `-v, --verbose` | Show matched-character details when resolving a collection. |
+| `-q, --quiet` | Suppress progress output. |
+
 ## Architecture
 
 The project deliberately separates reusable mechanics from source-specific behavior:
 
-```text
-src/shimeji_dl/
-├── core/                  # Generic HTTP, models, engine, storage and adaptive probing
-├── formats/               # Shimeji configuration formats
-│   └── shimeji_xml.py     # lxml-backed XML implementation
-├── sources/               # Remote source adapters
-│   └── shimejis_xyz/      # shimejis.xyz extraction and URL layout
-├── ui/                    # Presentation implementations
-│   └── rich.py            # Rich progress/reporting and confirmations
-├── cli.py                 # Typer CLI composition root
-└── version.py             # Reads installed metadata; pyproject.toml is the SSOT
-```
+| Path | Description |
+| --- | --- |
+| [src/shimeji_dl/archive/](src/shimeji_dl/archive/) | Local-only archiving: resolver, naming, the shared archiver |
+| [src/shimeji_dl/core/](src/shimeji_dl/core/) | Generic HTTP, models, engine, storage and adaptive probing |
+| [src/shimeji_dl/formats/](src/shimeji_dl/formats/) | Shimeji configuration formats |
+| [src/shimeji_dl/formats/shimeji_xml.py](src/shimeji_dl/formats/shimeji_xml.py) | lxml-backed XML implementation |
+| [src/shimeji_dl/sources/](src/shimeji_dl/sources/) | Remote source adapters and their network-free target vocabularies |
+| [src/shimeji_dl/sources/shimejis_xyz/](src/shimeji_dl/sources/shimejis_xyz/) | shimejis.xyz extraction, URL layout and target vocabulary |
+| [src/shimeji_dl/ui/](src/shimeji_dl/ui/) | Presentation implementations |
+| [src/shimeji_dl/ui/rich.py](src/shimeji_dl/ui/rich.py) | Rich progress/reporting and confirmations |
+| [src/shimeji_dl/cli/](src/shimeji_dl/cli/) | Typer CLI composition root: group class, download, archive |
+| [src/shimeji_dl/version.py](src/shimeji_dl/version.py) | Reads installed metadata; pyproject.toml is the SSOT |
 
 The generic downloader only talks to protocols (`SourceAdapter`, optional `ManifestSourceAdapter`, `ConfigFormat`, and `Reporter`).
 
-Adding another site does not require modifying the probing engine or download core.
+Adding another site does not require modifying the probing engine or download core.  
 A source can optionally expose an authoritative manifest and sprite atlas without making that capability mandatory for other adapters.
 
 ## How assets are found
@@ -156,7 +191,9 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 
 ## Useful options
 
-| Option | Description |
+`download` is the default command, so it never has to be named explicitly.
+
+| `download` option | Description |
 | --- | --- |
 | `-o, --output PATH` | Set the Shimeji installation or download root. |
 | `-j, --jobs INTEGER` | Set concurrent character downloads, defaulting to `5`. |
@@ -169,10 +206,15 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 | `-y, --yes` | Accept confirmation prompts automatically. |
 | `--strict` | Fail when a character or referenced asset is incomplete. |
 | `--metadata / --no-metadata` | Enable or disable `metadata.json`. |
-| `--archive` | Create a ZIP archive after downloading. |
+| `--archive` | Archive each target into the output root after downloading. |
 | `-v, --verbose` | Show detailed discovery and URL diagnostics. |
 | `-q, --quiet` | Suppress progress output. |
-| `--version` | Print the installed version. |
+
+`--version` is a top-level option, given before any command:
+
+```bash
+uv run shimeji-dl --version
+```
 
 ## License
 
