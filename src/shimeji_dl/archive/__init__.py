@@ -2,6 +2,7 @@ from .archiver import build_archive
 from .local_resolver import resolve_global, resolve_target
 from .metadata_state import MetadataState
 from .refusals.archive_name_invalid import ArchiveNameInvalid
+from .refusals.archive_overwrite_refused import ArchiveOverwriteRefused
 from .refusals.archive_source_unreadable import ArchiveSourceUnreadable
 from .refusals.archive_write_failed import ArchiveWriteFailed
 from .refusals.character_not_found import CharacterNotFound
@@ -20,6 +21,7 @@ from .result import ArchiveResult
 
 __all__ = [
     "ArchiveNameInvalid",
+    "ArchiveOverwriteRefused",
     "ArchiveReporter",
     "ArchiveRequest",
     "ArchiveResult",

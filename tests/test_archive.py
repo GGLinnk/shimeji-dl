@@ -9,6 +9,7 @@ import pytest
 
 from shimeji_dl.archive import (
     ArchiveNameInvalid,
+    ArchiveOverwriteRefused,
     ArchiveSourceUnreadable,
     ArchiveWriteFailed,
     CharacterNotFound,
@@ -32,11 +33,21 @@ from shimeji_dl.sources.shimejis_xyz.manifest_schema import ManifestMetadataWire
 
 
 class _RecordingReporter:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        confirm_answer: bool = True,
+        can_confirm: bool = True,
+        confirm_raises_eof: bool = False,
+    ) -> None:
         self.started: tuple[str, int, int] | None = None
         self.entries_written = 0
         self.finished: tuple[Path, int, int] | None = None
         self.warnings: list[str] = []
+        self.confirm_messages: list[str] = []
+        self._confirm_answer = confirm_answer
+        self._can_confirm = can_confirm
+        self._confirm_raises_eof = confirm_raises_eof
 
     def archive_started(self, name: str, entry_count: int, byte_total: int) -> None:
         self.started = (name, entry_count, byte_total)
@@ -49,6 +60,15 @@ class _RecordingReporter:
 
     def warning(self, message: str) -> None:
         self.warnings.append(message)
+
+    def confirm(self, message: str, *, default: bool = False) -> bool:
+        self.confirm_messages.append(message)
+        if self._confirm_raises_eof:
+            raise EOFError("stdin closed while reading the confirmation")
+        return self._confirm_answer
+
+    def can_confirm(self) -> bool:
+        return self._can_confirm
 
 
 def _write_character(
@@ -744,3 +764,102 @@ def test_build_archive_rejects_a_hostile_collection_name_and_never_escapes_the_r
 
     assert not (tmp_path.parent / "escape.zip").exists()
     assert list(tmp_path.iterdir()) == [image_root]
+
+
+def test_build_archive_never_asks_when_no_archive_exists_yet(tmp_path: Path) -> None:
+    image_root = tmp_path / "img"
+    _write_character(image_root, "sans")
+    reporter = _RecordingReporter()
+    request = resolve_target(image_root, tmp_path, "sans", reporter=reporter)
+
+    build_archive(image_root, tmp_path, request, reporter=reporter)
+
+    assert reporter.confirm_messages == []
+
+
+def test_build_archive_refuses_to_replace_an_existing_archive_without_confirmation(tmp_path: Path) -> None:
+    image_root = tmp_path / "img"
+    _write_character(image_root, "sans")
+    reporter = _RecordingReporter(confirm_answer=False)
+    request = resolve_target(image_root, tmp_path, "sans", reporter=reporter)
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    original = existing.read_bytes()
+
+    with pytest.raises(ArchiveOverwriteRefused) as excinfo:
+        build_archive(image_root, tmp_path, request, reporter=reporter)
+
+    assert excinfo.value.path == existing
+    assert excinfo.value.no_terminal is False
+    assert existing.read_bytes() == original
+    assert list(tmp_path.glob("*.part")) == []
+    assert reporter.confirm_messages
+    assert str(existing) in reporter.confirm_messages[0]
+
+
+def test_build_archive_replaces_an_existing_archive_after_confirmation(tmp_path: Path) -> None:
+    image_root = tmp_path / "img"
+    _write_character(image_root, "sans")
+    reporter = _RecordingReporter(confirm_answer=True)
+    request = resolve_target(image_root, tmp_path, "sans", reporter=reporter)
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+
+    result = build_archive(image_root, tmp_path, request, reporter=reporter)
+
+    assert result.path == existing
+    assert existing.read_bytes() != b"pre-existing archive bytes"
+    with zipfile.ZipFile(existing) as archive:
+        assert "img/sans/shime1.png" in archive.namelist()
+
+
+def test_build_archive_with_assume_yes_replaces_without_asking(tmp_path: Path) -> None:
+    image_root = tmp_path / "img"
+    _write_character(image_root, "sans")
+    reporter = _RecordingReporter(confirm_answer=False, can_confirm=False)
+    request = resolve_target(image_root, tmp_path, "sans", reporter=reporter)
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+
+    result = build_archive(image_root, tmp_path, request, reporter=reporter, assume_yes=True)
+
+    assert result.path == existing
+    assert existing.read_bytes() != b"pre-existing archive bytes"
+    assert reporter.confirm_messages == []
+
+
+def test_build_archive_refuses_when_no_interactive_terminal_is_available(tmp_path: Path) -> None:
+    image_root = tmp_path / "img"
+    _write_character(image_root, "sans")
+    reporter = _RecordingReporter(can_confirm=False)
+    request = resolve_target(image_root, tmp_path, "sans", reporter=reporter)
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    original = existing.read_bytes()
+
+    with pytest.raises(ArchiveOverwriteRefused) as excinfo:
+        build_archive(image_root, tmp_path, request, reporter=reporter)
+
+    assert excinfo.value.path == existing
+    assert excinfo.value.no_terminal is True
+    assert "no confirmation could be asked" in str(excinfo.value)
+    assert existing.read_bytes() == original
+    assert reporter.confirm_messages == []
+
+
+def test_build_archive_refuses_when_the_prompt_hits_eof_instead_of_an_answer(tmp_path: Path) -> None:
+    """A terminal reported as interactive but closed mid-read must refuse typed, never crash bare."""
+    image_root = tmp_path / "img"
+    _write_character(image_root, "sans")
+    reporter = _RecordingReporter(can_confirm=True, confirm_raises_eof=True)
+    request = resolve_target(image_root, tmp_path, "sans", reporter=reporter)
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    original = existing.read_bytes()
+
+    with pytest.raises(ArchiveOverwriteRefused) as excinfo:
+        build_archive(image_root, tmp_path, request, reporter=reporter)
+
+    assert excinfo.value.path == existing
+    assert excinfo.value.no_terminal is True
+    assert existing.read_bytes() == original

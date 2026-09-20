@@ -184,10 +184,18 @@ class RichReporter:
         if self.verbose_enabled and not self.quiet:
             self.progress.console.print(f"[dim]{escape(message)}[/dim]", overflow="fold")
 
-    def confirm(self, message: str, *, default: bool = False) -> bool:
-        if not sys.stdin.isatty():
+    def can_confirm(self) -> bool:
+        if sys.stdin is None or sys.stdin.closed:
             return False
-        return Confirm.ask(message, default=default, console=self.console)
+        try:
+            return sys.stdin.isatty()
+        except OSError:
+            return False
+
+    def confirm(self, message: str, *, default: bool = False) -> bool:
+        if not self.can_confirm():
+            return False
+        return Confirm.ask(escape(message), default=default, console=self.console)
 
     def finish(self) -> None:
         if self._started:

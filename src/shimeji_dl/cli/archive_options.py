@@ -8,10 +8,11 @@ from pathlib import Path
 class ArchiveCommandOptions:
     """Every `archive` command-line value, typed once at the parsing boundary.
 
-    Carries only the output root, verbosity and quiet: the archive command performs no network work, so the download-only options have no place here.
+    Carries only the output root, the blanket acceptance option, verbosity and quiet: the archive command performs no network work, so the download-only options have no place here.
     """
 
     targets: tuple[str, ...]
     output: Path
     verbose: bool
     quiet: bool
+    yes: bool = False

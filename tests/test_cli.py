@@ -1,33 +1,51 @@
 import asyncio
 import zipfile
+from io import StringIO
 from pathlib import Path
 
 import pytest
 
 from shimeji_dl.cli.archive import _run_archive
 from shimeji_dl.cli.archive_options import ArchiveCommandOptions
+from shimeji_dl.cli.confirmation_unavailable import ConfirmationUnavailable
 from shimeji_dl.cli.download import (
     _archive_each_target,
     _extract_targets,
     _merge_retry_results,
+    _run_download,
     _should_retry,
 )
+from shimeji_dl.cli.download_options import DownloadCommandOptions
 from shimeji_dl.cli.output_layout import image_output_root
+from shimeji_dl.cli.probe_mode import ProbeMode
+from shimeji_dl.cli.user_cancelled import UserCancelled
 from shimeji_dl.core.error_description import describe_error
 from shimeji_dl.core.models import CharacterRef, CharacterResult, ProbeReport
 from shimeji_dl.sources.target.local_target import LocalTarget
 from shimeji_dl.sources.target.target_kind import TargetKind
 from shimeji_dl.sources.target.target_vocabularies import reduce_target
+from shimeji_dl.ui.rich import RichReporter
 
 
 class ReporterStub:
-    def __init__(self, answer: bool) -> None:
+    def __init__(self, answer: bool, *, can_confirm: bool = True, raises_eof: bool = False) -> None:
         self.answer = answer
         self.calls = 0
+        self.warnings: list[str] = []
+        self._can_confirm = can_confirm
+        self._raises_eof = raises_eof
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
         self.calls += 1
+        if self._raises_eof:
+            raise EOFError("stdin closed while reading the confirmation")
         return self.answer
+
+    def can_confirm(self) -> bool:
+        return self._can_confirm
+
+    def warning(self, message: str) -> None:
+        self.warnings.append(message)
 
 
 def result(character_id: str, *, complete: bool) -> CharacterResult:
@@ -54,6 +72,26 @@ def test_retry_prompt_is_used_without_flags() -> None:
     reporter = ReporterStub(True)
     assert _should_retry(reporter, 2, auto_retry=False, assume_yes=False)
     assert reporter.calls == 1
+
+
+def test_retry_is_skipped_and_reported_with_no_interactive_terminal() -> None:
+    """The retry case never aborts the process: it skips the retry and says so in the report."""
+    reporter = ReporterStub(True, can_confirm=False)
+
+    assert _should_retry(reporter, 2, auto_retry=False, assume_yes=False) is False
+
+    assert reporter.calls == 0
+    assert reporter.warnings
+    assert "no confirmation could be asked" in reporter.warnings[0]
+
+
+def test_retry_is_skipped_and_reported_when_the_prompt_hits_eof() -> None:
+    reporter = ReporterStub(True, raises_eof=True)
+
+    assert _should_retry(reporter, 2, auto_retry=False, assume_yes=False) is False
+
+    assert reporter.warnings
+    assert "no confirmation could be asked" in reporter.warnings[0]
 
 
 def test_retry_results_replace_only_retried_characters() -> None:
@@ -129,11 +167,38 @@ class _NestedFailureSource:
 
 
 class _ExtractionReporterStub:
+    def __init__(self, *, answer: bool = True, can_confirm: bool = True, raises_eof: bool = False) -> None:
+        self.messages: list[str] = []
+        self._answer = answer
+        self._can_confirm = can_confirm
+        self._raises_eof = raises_eof
+
     def extraction(self, source: str, target: str) -> None:
         pass
 
     def confirm(self, message: str, *, default: bool = False) -> bool:
+        self.messages.append(message)
+        if self._raises_eof:
+            raise EOFError("stdin closed while reading the confirmation")
+        return self._answer
+
+    def can_confirm(self) -> bool:
+        return self._can_confirm
+
+
+class _ConfirmingSource:
+    """A source whose every target requires confirmation before extraction."""
+
+    key = "confirming"
+
+    def suitable(self, target: str) -> bool:
         return True
+
+    def confirmation_message(self, target: str) -> str | None:
+        return f"Download the whole of {target}?"
+
+    async def extract(self, client: object, target: str) -> list[CharacterRef]:
+        return [CharacterRef("confirming", target, f"https://example/{target}")]
 
 
 def test_extract_targets_failure_nests_inside_two_task_groups() -> None:
@@ -162,6 +227,59 @@ def test_extract_targets_failure_nests_inside_two_task_groups() -> None:
 
     messages = [describe_error(error) for error in outer.exceptions]
     assert messages == ["ValueError: no character links found in pack: pack"]
+
+
+def test_extract_targets_raises_confirmation_unavailable_with_no_interactive_terminal() -> None:
+    """The massive-target case refuses the run typed, naming the target, instead of aborting bare."""
+    source = _ConfirmingSource()
+    reporter = _ExtractionReporterStub(can_confirm=False)
+
+    async def run() -> None:
+        await _extract_targets(object(), {"confirming": source}, ["shimejis.xyz"], reporter, assume_yes=False)
+
+    with pytest.raises(ConfirmationUnavailable) as excinfo:
+        asyncio.run(run())
+
+    assert excinfo.value.target == "shimejis.xyz"
+
+
+def test_extract_targets_raises_confirmation_unavailable_when_the_prompt_hits_eof() -> None:
+    source = _ConfirmingSource()
+    reporter = _ExtractionReporterStub(raises_eof=True)
+
+    async def run() -> None:
+        await _extract_targets(object(), {"confirming": source}, ["shimejis.xyz"], reporter, assume_yes=False)
+
+    with pytest.raises(ConfirmationUnavailable):
+        asyncio.run(run())
+
+
+def test_extract_targets_raises_user_cancelled_on_a_decline() -> None:
+    source = _ConfirmingSource()
+    reporter = _ExtractionReporterStub(answer=False)
+
+    async def run() -> None:
+        await _extract_targets(object(), {"confirming": source}, ["shimejis.xyz"], reporter, assume_yes=False)
+
+    with pytest.raises(UserCancelled):
+        asyncio.run(run())
+
+
+def test_extract_targets_yes_flag_skips_the_confirmation_with_no_interactive_terminal() -> None:
+    """The blanket acceptance option answers yes even when no terminal could ever be asked."""
+    source = _ConfirmingSource()
+    reporter = _ExtractionReporterStub(can_confirm=False)
+
+    async def run() -> list[CharacterRef]:
+        unique, _ = await _extract_targets(
+            object(), {"confirming": source}, ["shimejis.xyz"], reporter, assume_yes=True
+        )
+        return unique
+
+    unique = asyncio.run(run())
+
+    assert [character.id for character in unique] == ["shimejis.xyz"]
+    assert reporter.messages == []
 
 
 @pytest.mark.parametrize(
@@ -196,8 +314,18 @@ def test_reduce_target_classifies_every_shape_shimejis_xyz_accepts(
 
 
 class _ArchiveReporterStub:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        confirm_answer: bool = True,
+        can_confirm: bool = True,
+        confirm_raises_eof: bool = False,
+    ) -> None:
         self.fatals: list[str] = []
+        self.confirm_messages: list[str] = []
+        self._confirm_answer = confirm_answer
+        self._can_confirm = can_confirm
+        self._confirm_raises_eof = confirm_raises_eof
 
     def archive_started(self, name: str, entry_count: int, byte_total: int) -> None:
         pass
@@ -213,6 +341,15 @@ class _ArchiveReporterStub:
 
     def fatal(self, message: str) -> None:
         self.fatals.append(message)
+
+    def confirm(self, message: str, *, default: bool = False) -> bool:
+        self.confirm_messages.append(message)
+        if self._confirm_raises_eof:
+            raise EOFError("stdin closed while reading the confirmation")
+        return self._confirm_answer
+
+    def can_confirm(self) -> bool:
+        return self._can_confirm
 
 
 def test_archive_each_target_names_a_pack_kind_target_by_its_pack_slug(tmp_path: Path) -> None:
@@ -425,6 +562,234 @@ def test_archive_command_resolves_a_pack_url_target_by_its_pack_slug(tmp_path: P
 
     assert exit_code == 0, list(tmp_path.iterdir())
     assert (tmp_path / "undertale-shimeji-pack.zip").exists()
+
+
+def test_archive_each_target_refuses_to_replace_an_existing_archive_without_confirmation(tmp_path: Path) -> None:
+    """The download path defers to the shared archiver's overwrite confirmation, naming the file."""
+    image_root = tmp_path / "img"
+    character_dir = image_root / "sans"
+    character_dir.mkdir(parents=True)
+    (character_dir / "shime1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    original = existing.read_bytes()
+    reporter = _ArchiveReporterStub(confirm_answer=False)
+
+    extraction_by_target = [("sans", [CharacterRef("stub", "sans", "https://example/sans")])]
+
+    failed = asyncio.run(_archive_each_target(image_root, tmp_path, extraction_by_target, reporter))
+
+    assert failed is True
+    assert existing.read_bytes() == original
+    assert reporter.fatals
+    assert reporter.confirm_messages
+    assert str(existing) in reporter.confirm_messages[0]
+
+
+def test_archive_each_target_yes_flag_replaces_an_existing_archive_without_asking(tmp_path: Path) -> None:
+    """The blanket acceptance option reaches the download path's own archive step."""
+    image_root = tmp_path / "img"
+    character_dir = image_root / "sans"
+    character_dir.mkdir(parents=True)
+    (character_dir / "shime1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    reporter = _ArchiveReporterStub(confirm_answer=False)
+
+    extraction_by_target = [("sans", [CharacterRef("stub", "sans", "https://example/sans")])]
+
+    failed = asyncio.run(
+        _archive_each_target(image_root, tmp_path, extraction_by_target, reporter, assume_yes=True)
+    )
+
+    assert failed is False
+    assert existing.read_bytes() != b"pre-existing archive bytes"
+    assert reporter.confirm_messages == []
+
+
+def test_archive_each_target_continues_past_a_confirmation_hitting_eof(tmp_path: Path) -> None:
+    """One target's prompt hitting EOF must never abort a sibling target's own archive."""
+    image_root = tmp_path / "img"
+    for identifier in ("sans", "good"):
+        character_dir = image_root / identifier
+        character_dir.mkdir(parents=True)
+        (character_dir / "shime1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    original = existing.read_bytes()
+    reporter = _ArchiveReporterStub(confirm_raises_eof=True)
+
+    extraction_by_target = [
+        ("sans", [CharacterRef("stub", "sans", "https://example/sans")]),
+        ("good", [CharacterRef("stub", "good", "https://example/good")]),
+    ]
+
+    failed = asyncio.run(_archive_each_target(image_root, tmp_path, extraction_by_target, reporter))
+
+    assert failed is True
+    assert existing.read_bytes() == original
+    assert (tmp_path / "good.zip").exists()
+    assert reporter.fatals
+    assert "no confirmation could be asked" in reporter.fatals[0]
+
+
+def test_run_archive_refuses_to_replace_an_existing_archive_with_no_interactive_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `archive` command shares the same overwrite refusal, with the precondition forced deliberately."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    image_root = tmp_path / "img"
+    character_dir = image_root / "sans"
+    character_dir.mkdir(parents=True)
+    (character_dir / "shime1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    original = existing.read_bytes()
+
+    options = ArchiveCommandOptions(targets=("sans",), output=tmp_path, verbose=False, quiet=True)
+
+    exit_code = asyncio.run(_run_archive(options))
+
+    assert exit_code != 0
+    assert existing.read_bytes() == original
+
+
+def test_run_archive_yes_flag_replaces_an_existing_archive_without_asking(tmp_path: Path) -> None:
+    """`archive --yes` replaces an existing archive even with no interactive terminal available."""
+    image_root = tmp_path / "img"
+    character_dir = image_root / "sans"
+    character_dir.mkdir(parents=True)
+    (character_dir / "shime1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+
+    options = ArchiveCommandOptions(targets=("sans",), output=tmp_path, verbose=False, quiet=True, yes=True)
+
+    exit_code = asyncio.run(_run_archive(options))
+
+    assert exit_code == 0
+    assert existing.read_bytes() != b"pre-existing archive bytes"
+
+
+def test_run_archive_refuses_typed_with_stdin_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed file descriptor 0 (`<&-`) leaves `sys.stdin` as `None`; the archive command must still refuse typed."""
+    monkeypatch.setattr("sys.stdin", None)
+    image_root = tmp_path / "img"
+    character_dir = image_root / "sans"
+    character_dir.mkdir(parents=True)
+    (character_dir / "shime1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    original = existing.read_bytes()
+
+    options = ArchiveCommandOptions(targets=("sans",), output=tmp_path, verbose=False, quiet=True)
+
+    exit_code = asyncio.run(_run_archive(options))
+
+    assert exit_code != 0
+    assert existing.read_bytes() == original
+
+
+def test_run_archive_refuses_typed_with_stdin_closed_in_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`sys.stdin.close()` in-process makes `isatty()` raise `ValueError`, not `OSError`: still refused typed."""
+    closed_stream = StringIO()
+    closed_stream.close()
+    monkeypatch.setattr("sys.stdin", closed_stream)
+    image_root = tmp_path / "img"
+    character_dir = image_root / "sans"
+    character_dir.mkdir(parents=True)
+    (character_dir / "shime1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    existing = tmp_path / "sans.zip"
+    existing.write_bytes(b"pre-existing archive bytes")
+    original = existing.read_bytes()
+
+    options = ArchiveCommandOptions(targets=("sans",), output=tmp_path, verbose=False, quiet=True)
+
+    exit_code = asyncio.run(_run_archive(options))
+
+    assert exit_code == 1
+    assert existing.read_bytes() == original
+    # Collapsed to tolerate the console wrapping the line at its own width.
+    stderr = " ".join(capsys.readouterr().err.split())
+    assert "no confirmation could be asked" in stderr
+    assert "no interactive terminal" in stderr
+
+
+def _base_download_options(**overrides: object) -> DownloadCommandOptions:
+    defaults: dict[str, object] = {
+        "targets": (),
+        "output": Path("shimeji-downloads"),
+        "jobs": 1,
+        "connections": 1,
+        "timeout": 1.0,
+        "retries": 0,
+        "probe": ProbeMode.OFF,
+        "overwrite": False,
+        "retry": False,
+        "yes": False,
+        "strict": False,
+        "metadata": False,
+        "archive": False,
+        "verbose": False,
+        "quiet": True,
+    }
+    defaults.update(overrides)
+    return DownloadCommandOptions(**defaults)  # type: ignore[arg-type]
+
+
+def test_run_download_massive_target_refuses_with_exit_2_when_stdin_is_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A closed stdin must never crash `_run_download`; the massive-target case exits 2, naming the target."""
+    monkeypatch.setattr("sys.stdin", None)
+    options = _base_download_options(targets=("shimejis.xyz",), output=tmp_path)
+
+    exit_code = asyncio.run(_run_download(options))
+
+    assert exit_code == 2
+    output = capsys.readouterr().err
+    assert "no confirmation could be asked for shimejis.xyz" in output
+
+
+def test_run_download_massive_target_downloads_nothing_when_stdin_is_closed_in_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The in-process closed-stream form of a closed stdin must also exit 2 and download nothing."""
+    closed_stream = StringIO()
+    closed_stream.close()
+    monkeypatch.setattr("sys.stdin", closed_stream)
+    options = _base_download_options(targets=("shimejis.xyz",), output=tmp_path)
+
+    exit_code = asyncio.run(_run_download(options))
+
+    assert exit_code == 2
+    output = capsys.readouterr().err
+    assert "no confirmation could be asked for shimejis.xyz" in output
+    assert not (tmp_path / "img").exists()
+
+
+def test_should_retry_warns_instead_of_crashing_when_stdin_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The retry path, through the real reporter, skips and reports rather than crashing on a closed stdin."""
+    monkeypatch.setattr("sys.stdin", None)
+    reporter = RichReporter(quiet=True)
+
+    result = _should_retry(reporter, 3, auto_retry=False, assume_yes=False)
+
+    assert result is False
+    output = capsys.readouterr().out
+    assert "no confirmation could be asked" in output
 
 
 def test_quiet_archive_still_prints_the_warning_for_a_corrupt_sibling(
