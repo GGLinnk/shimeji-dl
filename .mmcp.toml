@@ -1,0 +1,11 @@
+project_uuid = "01a0bbbe-cb71-71ce-a91e-934eccb45608"
+project_slug = "shimeji-dl"
+project_remote_only = false
+
+[subscriptions]
+no_default_global = false
+auto_detect_languages = false
+languages = ["python"]
+groups = []
+memories = []
+tags = []
