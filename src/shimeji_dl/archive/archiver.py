@@ -5,7 +5,9 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..core.confirmation import Confirmation, ask_for_confirmation
 from .naming import resolve_archive_path
+from .refusals.archive_overwrite_refused import ArchiveOverwriteRefused
 from .refusals.archive_source_unreadable import ArchiveSourceUnreadable
 from .refusals.archive_write_failed import ArchiveWriteFailed
 from .reporter import ArchiveReporter
@@ -20,18 +22,33 @@ class _Entry:
     is_dir: bool
 
 
-def build_archive(image_root: Path, output_root: Path, request: ArchiveRequest, *, reporter: ArchiveReporter) -> ArchiveResult:
+def build_archive(
+    image_root: Path,
+    output_root: Path,
+    request: ArchiveRequest,
+    *,
+    reporter: ArchiveReporter,
+    assume_yes: bool = False,
+) -> ArchiveResult:
     """Write one archive from an already-resolved request; the one owner both commands share.
 
     Every entry is written `.write()`-style directly from the character directories the request names: content never comes from walking the output root, so the archive being written can never include itself.
+    An existing final file is confirmed before replacement, checked on the final path itself, before entry collection or any temporary file; `assume_yes` skips the prompt.
     """
+    final_path = resolve_archive_path(output_root, request.name)
+    try:
+        already_exists = final_path.exists()
+    except OSError as exc:
+        raise ArchiveSourceUnreadable(final_path, exc) from exc
+    if already_exists:
+        _confirm_overwrite(final_path, reporter=reporter, assume_yes=assume_yes)
+
     try:
         entries = _collect_entries(image_root, request.characters)
         byte_total = sum(entry.absolute.stat().st_size for entry in entries if not entry.is_dir)
     except OSError as exc:
         raise ArchiveSourceUnreadable(_offending_path(exc, image_root), exc) from exc
 
-    final_path = resolve_archive_path(output_root, request.name)
     temp_path = final_path.with_name(final_path.name + ".part")
 
     reporter.archive_started(request.name, len(entries), byte_total)
@@ -53,6 +70,17 @@ def build_archive(image_root: Path, output_root: Path, request: ArchiveRequest, 
         raise ArchiveSourceUnreadable(final_path, exc) from exc
     reporter.archive_finished(final_path, len(entries), size)
     return ArchiveResult(final_path, len(entries), size)
+
+
+def _confirm_overwrite(path: Path, *, reporter: ArchiveReporter, assume_yes: bool) -> None:
+    """Ask before replacing an existing archive, through the one mechanism every confirmation site shares."""
+    if assume_yes:
+        return
+    outcome = ask_for_confirmation(reporter, f"Archive already exists: {path}. Replace it?", default=False)
+    if outcome is Confirmation.UNAVAILABLE:
+        raise ArchiveOverwriteRefused(path, no_terminal=True)
+    if outcome is Confirmation.DECLINED:
+        raise ArchiveOverwriteRefused(path)
 
 
 def _offending_path(exc: OSError, fallback: Path) -> Path:

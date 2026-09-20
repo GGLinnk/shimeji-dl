@@ -26,6 +26,10 @@ def archive(
         Path,
         typer.Option("--output", "-o", help="Shimeji-compatible output root to archive from."),
     ] = Path("shimeji-downloads"),
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Answer yes to all confirmation prompts."),
+    ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show matched-character details.")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Suppress progress output.")] = False,
 ) -> None:
@@ -38,6 +42,7 @@ def archive(
         output=output,
         verbose=verbose,
         quiet=quiet,
+        yes=yes,
     )
     raise typer.Exit(asyncio.run(_run_archive(options)))
 
@@ -47,11 +52,15 @@ async def _run_archive(options: ArchiveCommandOptions) -> int:
     image_root = image_output_root(options.output)
 
     if not options.targets:
-        return await _resolve_and_build(image_root, options.output, None, reporter, verbose=options.verbose)
+        return await _resolve_and_build(
+            image_root, options.output, None, reporter, verbose=options.verbose, assume_yes=options.yes
+        )
 
     failed = False
     for target in options.targets:
-        exit_code = await _resolve_and_build(image_root, options.output, target, reporter, verbose=options.verbose)
+        exit_code = await _resolve_and_build(
+            image_root, options.output, target, reporter, verbose=options.verbose, assume_yes=options.yes
+        )
         if exit_code != 0:
             failed = True
     return 1 if failed else 0
@@ -64,6 +73,7 @@ async def _resolve_and_build(
     reporter: RichReporter,
     *,
     verbose: bool,
+    assume_yes: bool = False,
 ) -> int:
     """Resolve and build one target's own archive; a refusal here never blocks a sibling target."""
     try:
@@ -79,7 +89,7 @@ async def _resolve_and_build(
     if verbose:
         reporter.verbose(f"archiving {request.name}: {len(request.characters)} character(s)")
     try:
-        await asyncio.to_thread(build_archive, image_root, output_root, request, reporter=reporter)
+        await asyncio.to_thread(build_archive, image_root, output_root, request, reporter=reporter, assume_yes=assume_yes)
     except ArchivingRefusal as exc:
         reporter.fatal(str(exc))
         return 1

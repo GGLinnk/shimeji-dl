@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from ..archive import ArchiveRequest, ArchivingRefusal, build_archive
+from ..core.confirmation import Confirmation, ask_for_confirmation
 from ..core.engine import DownloadEngine, DownloadOptions
 from ..core.error_description import describe_error
 from ..core.http import HttpClient
@@ -21,6 +22,7 @@ from ..sources.target.target_kind import TargetKind
 from ..sources.target.target_vocabularies import reduce_target
 from ..ui import RichReporter
 from ..version import get_version
+from .confirmation_unavailable import ConfirmationUnavailable
 from .download_options import DownloadCommandOptions
 from .output_layout import image_output_root
 from .probe_mode import ProbeMode
@@ -140,6 +142,10 @@ async def _run_download(options: DownloadCommandOptions) -> int:
         except* UserCancelled:
             reporter.info("Cancelled.")
             extraction_exit_code = 0
+        except* ConfirmationUnavailable as eg:
+            for unavailable in eg.exceptions:
+                reporter.fatal(str(unavailable))
+            extraction_exit_code = 2
         except* (ValueError, HttpError) as eg:
             for error in eg.exceptions:
                 reporter.fatal(describe_error(error))
@@ -189,7 +195,9 @@ async def _run_download(options: DownloadCommandOptions) -> int:
 
     archive_failed = False
     if options.archive:
-        archive_failed = await _archive_each_target(image_root, options.output, extraction_by_target, reporter)
+        archive_failed = await _archive_each_target(
+            image_root, options.output, extraction_by_target, reporter, assume_yes=options.yes
+        )
 
     if options.strict and strict_failures:
         return 1
@@ -203,6 +211,8 @@ async def _archive_each_target(
     output_root: Path,
     extraction_by_target: list[tuple[str, list[CharacterRef]]],
     reporter: RichReporter,
+    *,
+    assume_yes: bool = False,
 ) -> bool:
     """Archive one target's own result set at a time; a failed target never aborts the others."""
     failed = False
@@ -219,7 +229,9 @@ async def _archive_each_target(
             characters=tuple(image_root / character.id for character in characters),
         )
         try:
-            await asyncio.to_thread(build_archive, image_root, output_root, request, reporter=reporter)
+            await asyncio.to_thread(
+                build_archive, image_root, output_root, request, reporter=reporter, assume_yes=assume_yes
+            )
         except ArchivingRefusal as exc:
             reporter.fatal(str(exc))
             failed = True
@@ -240,8 +252,12 @@ async def _extract_targets(
         if source is None:
             raise ValueError(f"no source supports: {target}")
         message = source.confirmation_message(target)
-        if message and not assume_yes and not reporter.confirm(message, default=False):
-            raise UserCancelled()
+        if message and not assume_yes:
+            outcome = ask_for_confirmation(reporter, message, default=False)
+            if outcome is Confirmation.UNAVAILABLE:
+                raise ConfirmationUnavailable(target)
+            if outcome is Confirmation.DECLINED:
+                raise UserCancelled()
         resolved.append((source, target))
 
     async def extract_one(source: SourceAdapter, target: str) -> list[CharacterRef]:
@@ -276,7 +292,11 @@ def _should_retry(
 ) -> bool:
     if auto_retry or assume_yes:
         return True
-    return reporter.confirm(f"Retry {failed_count} failed character(s)?", default=False)
+    outcome = ask_for_confirmation(reporter, f"Retry {failed_count} failed character(s)?", default=False)
+    if outcome is Confirmation.UNAVAILABLE:
+        reporter.warning(f"no confirmation could be asked: not retrying {failed_count} failed character(s)")
+        return False
+    return outcome is Confirmation.ACCEPTED
 
 
 def _merge_retry_results(
