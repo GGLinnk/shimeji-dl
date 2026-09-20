@@ -156,7 +156,7 @@ class HttpClient:
         encoding = result.encoding or DEFAULT_TEXT_ENCODING
         try:
             return result.content.decode(encoding)
-        except (UnicodeDecodeError, LookupError) as exc:
+        except UnicodeDecodeError as exc:
             raise HttpError(
                 url,
                 result.status_code,

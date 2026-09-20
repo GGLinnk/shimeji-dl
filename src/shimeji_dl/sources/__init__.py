@@ -1,9 +1,1 @@
-from .shimejis_xyz import ShimejisXYZSource
-
-
-def default_sources() -> dict[str, ShimejisXYZSource]:
-    source = ShimejisXYZSource()
-    return {source.key: source}
-
-
-__all__ = ["ShimejisXYZSource", "default_sources"]
+"""Remote source adapters, kept separate from their network-free target vocabularies."""

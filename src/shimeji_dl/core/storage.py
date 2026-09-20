@@ -4,25 +4,20 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
 from urllib.parse import quote, unquote, urlsplit
 
 import pathvalidate
 
 from .asset_path_escapes_destination import AssetPathEscapesDestination
+from .resource_signature import ResourceSignature
 
 # Below the 255-byte name limit most filesystems share, and below Windows'
 # legacy MAX_PATH once the value is joined under a destination directory.
 MAX_ASSET_PATH_LENGTH = 240
 
-
-@dataclass(frozen=True, slots=True)
-class ResourceSignature:
-    kind: Literal["image", "audio"]
-    matches: Callable[[bytes], bool]
+# The single name every character directory's metadata document is written under and read back from.
+METADATA_FILENAME = "metadata.json"
 
 
 def _matches_png(data: bytes) -> bool:
@@ -216,6 +211,21 @@ def normalize_asset_ref(value: str) -> tuple[str, str | None] | None:
     if normalized is None or PurePosixPath(normalized[0]).suffix.lower() not in IMAGE_SUFFIXES:
         return None
     return normalized
+
+
+def validate_archive_name(name: str) -> str | None:
+    """Validate an untrusted string as a single archive filename component.
+
+    Shares `normalize_resource_ref`'s pathvalidate policy and length ceiling.
+    `.` and `..` pass pathvalidate's own filename check but are rejected here since a bare archive name is never meant to resolve as a directory reference.
+    """
+    if name in {".", ".."}:
+        return None
+    try:
+        pathvalidate.validate_filename(name, platform="universal", max_len=MAX_ASSET_PATH_LENGTH)
+    except pathvalidate.ValidationError:
+        return None
+    return name
 
 
 def quote_asset_path(path: str) -> str:

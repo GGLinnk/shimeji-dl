@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from .http import HttpClient
 from .models import (
@@ -21,7 +22,9 @@ class ConfigFormat(Protocol):
 
 class SourceAdapter(Protocol):
     key: str
-    config_names: Sequence[str]
+
+    @property
+    def config_names(self) -> Sequence[str]: ...
 
     @classmethod
     def suitable(cls, target: str) -> bool: ...
@@ -41,16 +44,19 @@ class SourceAdapter(Protocol):
     def prioritize(self, character: CharacterRef, configs: Iterable[ConfigResource | None]) -> None: ...
 
 
-@runtime_checkable
-class ManifestSourceAdapter(Protocol):
-    """Optional source capability for an authoritative per-character manifest."""
+class ManifestSourceAdapter(ABC):
+    """Optional source capability for an authoritative per-character manifest.
 
+    A source declares this capability by inheriting from it explicitly, so an incompatible `fetch_manifest` override is a mypy error at that source's own definition, never a runtime surprise discovered only because an unrelated attribute happened to share the name.
+    """
+
+    @abstractmethod
     async def fetch_manifest(
         self,
         client: HttpClient,
         character: CharacterRef,
         *,
-        report_rejection: Callable[[str], None] = ...,
+        report_rejection: Callable[[str], None],
     ) -> SourceManifest | None: ...
 
 

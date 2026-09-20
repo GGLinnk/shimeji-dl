@@ -3,15 +3,29 @@ from __future__ import annotations
 import sys
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 
 from rich.console import Console
 from rich.markup import escape
-from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn
 from rich.prompt import Confirm
 from rich.table import Column
 
 from ..core.models import CharacterRef, CharacterResult
 from ..core.storage import compress_numbers
+
+# Binary unit step for rendering an archive's size in the outcome line.
+_BYTES_PER_UNIT = 1024
+_SIZE_UNITS = ("B", "KiB", "MiB", "GiB", "TiB")
+
+
+def _human_size(size: int) -> str:
+    value = float(size)
+    for unit in _SIZE_UNITS[:-1]:
+        if value < _BYTES_PER_UNIT:
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= _BYTES_PER_UNIT
+    return f"{value:.1f} {_SIZE_UNITS[-1]}"
 
 
 class RichReporter:
@@ -32,9 +46,12 @@ class RichReporter:
         self._active: dict[str, str] = {}
         self._summary_task: TaskID | None = None
         self._total = 0
+        self._completed = 0
         self._failed = 0
         self._visible_capacity = 1
         self._started = False
+        self._archive_progress: Progress | None = None
+        self._archive_task: TaskID | None = None
 
     def _make_progress(self) -> Progress:
         # No BarColumn or MofNCompleteColumn: every column here is
@@ -67,6 +84,7 @@ class RichReporter:
         self._tasks.clear()
         self._active.clear()
         self._total = len(characters)
+        self._completed = 0
         self._failed = 0
         self._visible_capacity = max(1, self.console.height - 3)
         self.progress.start()
@@ -102,15 +120,13 @@ class RichReporter:
             self.progress.remove_task(task)
         if result.retryable:
             self._failed += 1
+        self._completed += 1
         if self._summary_task is not None:
             self.progress.advance(self._summary_task, 1)
         self._sync_visible_tasks()
         self._update_summary()
 
-    def report_results(self, results: Sequence[CharacterResult]) -> None:
-        if self.quiet:
-            return
-
+    def report_results(self, results: Sequence[CharacterResult], *, output: Path) -> None:
         issues = [result for result in results if result.error or result.referenced_missing]
         if issues:
             self.progress.console.print(f"[bold]Issues:[/bold] {len(issues)} character(s)", overflow="fold")
@@ -143,9 +159,22 @@ class RichReporter:
                         f"{result.character.id}: probe-missing: {', '.join(compress_numbers(result.probe.misses))}"
                     )
 
+        usable = sum(result.usable for result in results)
+        complete = sum(result.complete for result in results)
+        source_missing = sum(
+            any(item.kind == "source-missing" for item in result.referenced_missing) for result in results
+        )
+        unusable = len(results) - usable
+        self.progress.console.print(
+            f"Finished: {usable}/{len(results)} usable, {complete}/{len(results)} complete, "
+            f"{source_missing} source-missing, {unusable} unusable character(s). "
+            f"Output: {output}",
+            overflow="fold",
+        )
+
     def warning(self, message: str) -> None:
-        if not self.quiet:
-            self.progress.console.print(f"[yellow]warning:[/yellow] {escape(message)}", overflow="fold")
+        # Quiet suppresses progress and informational output only; a warning is neither and always prints.
+        self.progress.console.print(f"[yellow]warning:[/yellow] {escape(message)}", overflow="fold")
 
     def info(self, message: str) -> None:
         if not self.quiet:
@@ -168,6 +197,34 @@ class RichReporter:
     def fatal(self, message: str) -> None:
         self.error_console.print(f"[red]error:[/red] {escape(message)}", overflow="fold")
 
+    def archive_started(self, name: str, entry_count: int, byte_total: int) -> None:
+        # The announcement always prints, even under --quiet: only the progress bar respects it.
+        self.console.print(f"[cyan]archive[/cyan]: {escape(name)} ({entry_count} entries)", overflow="fold")
+        if self.quiet:
+            return
+        self._archive_progress = Progress(
+            SpinnerColumn(table_column=Column(width=1, no_wrap=True)),
+            TextColumn("{task.description}", table_column=Column(ratio=1, no_wrap=False, overflow="fold")),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            console=self.console,
+            transient=True,
+        )
+        self._archive_progress.start()
+        self._archive_task = self._archive_progress.add_task(name, total=entry_count)
+
+    def archive_entry_written(self, entries_done: int, entry_count: int) -> None:
+        if self._archive_progress is not None and self._archive_task is not None:
+            self._archive_progress.update(self._archive_task, completed=entries_done)
+
+    def archive_finished(self, path: Path, entry_count: int, size: int) -> None:
+        if self._archive_progress is not None:
+            self._archive_progress.stop()
+            self._archive_progress = None
+            self._archive_task = None
+        # The outcome always prints, even under --quiet.
+        self.console.print(f"[cyan]archive[/cyan]: {escape(str(path))} ({_human_size(size)})", overflow="fold")
+
     def _sync_visible_tasks(self) -> None:
         for character_id, task in list(self._tasks.items()):
             if character_id not in self._active:
@@ -181,16 +238,10 @@ class RichReporter:
                 break
             self._tasks[character_id] = self.progress.add_task(character_id, total=None, phase=phase)
 
-    def _task_completed(self, task_id: TaskID) -> int:
-        for task in self.progress.tasks:
-            if task.id == task_id:
-                return int(task.completed)
-        return 0
-
     def _update_summary(self) -> None:
         if self._summary_task is None:
             return
-        completed = self._task_completed(self._summary_task)
+        completed = self._completed
         queued = max(0, self._total - completed - len(self._active))
         hidden = max(0, len(self._active) - len(self._tasks))
         failed = f"[red]{self._failed} failed[/red]" if self._failed else "0 failed"

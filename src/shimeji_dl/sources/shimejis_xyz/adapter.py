@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Callable, Iterable
 from urllib.parse import urljoin, urlsplit
 
@@ -11,6 +10,7 @@ from lxml import html
 
 from ...core.http import HttpClient
 from ...core.http_error import HttpError
+from ...core.interfaces import ManifestSourceAdapter
 from ...core.models import (
     AssetRef,
     CharacterRef,
@@ -33,17 +33,21 @@ from .manifest_schema import (
     ManifestMetadataWire,
     SpriteRegionWire,
 )
+from .target_vocabulary import (
+    CHARACTER_PREFIX,
+    DIRECTORY,
+    PACK_SUFFIX,
+    SITE,
+    SLUG_RE,
+    SOURCE_KEY,
+    WHOLE_SITE_TARGETS,
+)
 
-SITE = "https://shimejis.xyz"
-DIRECTORY = f"{SITE}/directory"
-CHARACTER_PREFIX = "/directory/shimeji/"
-SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ASSET_HOSTS = ("https://sprites.shimejis.xyz", "https://sprite.shimejis.xyz")
-WHOLE_SITE_TARGETS = {"shimejis.xyz", "www.shimejis.xyz"}
 
 
-class ShimejisXYZSource:
-    key = "shimejis.xyz"
+class ShimejisXYZSource(ManifestSourceAdapter):
+    key = SOURCE_KEY
     config_names = ("actions.xml", "behaviors.xml", "info.xml")
 
     def __init__(self) -> None:
@@ -71,7 +75,7 @@ class ShimejisXYZSource:
 
         if "://" not in normalized:
             slug = normalized.lower()
-            if slug.endswith("-shimeji-pack"):
+            if slug.endswith(PACK_SUFFIX):
                 return await self._extract_pack(client, f"{SITE}/directory/{slug}")
             return [self._character(slug)]
 
@@ -330,19 +334,18 @@ def _decode_metadata(raw: msgspec.Raw, report_rejection: Callable[[str], None]) 
 
 
 def _validate_sprite_entry(key: str, raw_region: msgspec.Raw) -> SpriteRegion:
-    raw_value = bytes(raw_region)
     normalized = normalize_asset_ref(key)
     if normalized is None:
-        raise InvalidSpritePath(key, raw_value)
+        raise InvalidSpritePath(key)
     path, absolute_url = normalized
     if absolute_url is not None:
-        raise SpriteAbsoluteUrlPresent(key, raw_value)
+        raise SpriteAbsoluteUrlPresent(key)
     if not path.lower().endswith(".png"):
-        raise SpriteWrongSuffix(key, raw_value)
+        raise SpriteWrongSuffix(key)
     try:
         region = msgspec.json.decode(raw_region, type=SpriteRegionWire)
     except msgspec.ValidationError as exc:
-        raise InvalidSpriteRegion(key, raw_value) from exc
+        raise InvalidSpriteRegion(key) from exc
     return SpriteRegion(path, region.x, region.y, region.width, region.height)
 
 

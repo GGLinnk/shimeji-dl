@@ -26,6 +26,7 @@ from .models import (
 )
 from .probing import AdaptiveNumericProber, numeric_indices
 from .storage import (
+    METADATA_FILENAME,
     atomic_write,
     atomic_write_json,
     collect_images,
@@ -258,7 +259,7 @@ class DownloadEngine:
     ) -> SourceManifest | None:
         if not isinstance(source, ManifestSourceAdapter):
             return None
-        return await source.fetch_manifest(self.client, character, report_rejection=self.reporter.verbose)
+        return await source.fetch_manifest(self.client, character, report_rejection=self.reporter.warning)
 
     async def _materialize_spritesheet(
         self,
@@ -266,12 +267,16 @@ class DownloadEngine:
         manifest: SourceManifest,
         dest: Path,
     ) -> set[str]:
-        present = (
-            set()
-            if self.options.overwrite
-            else await asyncio.to_thread(_valid_manifest_paths, manifest, dest, self.reporter.warning)
-        )
-        needed = {path: region for path, region in manifest.sprites.items() if path not in present}
+        if self.options.overwrite:
+            present: set[str] = set()
+            rejected: set[str] = set()
+        else:
+            present, rejected = await asyncio.to_thread(_valid_manifest_paths, manifest, dest, self.reporter.warning)
+        needed = {
+            path: region
+            for path, region in manifest.sprites.items()
+            if path not in present and path not in rejected
+        }
         if not needed or not manifest.spritesheet_url:
             return present
 
@@ -283,14 +288,13 @@ class DownloadEngine:
         if response is None or not looks_like_resource(response.content, "spritesheet.png"):
             return present
 
-        extracted, rejected = await asyncio.to_thread(
+        extracted = await asyncio.to_thread(
             _extract_sprite_regions,
             response.content,
             needed,
             dest,
+            self.reporter.warning,
         )
-        for path in rejected:
-            self.reporter.warning(f"rejected sprite region path escaping destination: {path}")
         return present | extracted
 
     async def _download_ref(
@@ -398,7 +402,7 @@ class DownloadEngine:
                 ],
             },
         }
-        atomic_write_json(dest / "metadata.json", metadata)
+        atomic_write_json(dest / METADATA_FILENAME, metadata)
 
 
 def _merge_refs(*groups: list[AssetRef]) -> list[AssetRef]:
@@ -456,9 +460,9 @@ def _extract_sprite_regions(
     spritesheet: bytes,
     regions: dict[str, SpriteRegion],
     dest: Path,
-) -> tuple[set[str], list[str]]:
+    report_rejection: Callable[[str], None],
+) -> set[str]:
     extracted: set[str] = set()
-    rejected: list[str] = []
     try:
         with Image.open(BytesIO(spritesheet)) as image:
             image.load()
@@ -471,33 +475,43 @@ def _extract_sprite_regions(
                 try:
                     target = confined_asset_path(dest, path)
                 except AssetPathEscapesDestination:
-                    rejected.append(path)
+                    report_rejection(f"rejected sprite region path escaping destination: {path}")
                     continue
                 sprite = image.crop((region.x, region.y, right, bottom))
-                output = BytesIO()
-                sprite.save(output, format="PNG", optimize=False)
-                atomic_write(target, output.getvalue())
+                try:
+                    output = BytesIO()
+                    sprite.save(output, format="PNG", optimize=False)
+                    atomic_write(target, output.getvalue())
+                except OSError as exc:
+                    report_rejection(f"cannot write sprite {path}: {exc}")
+                    continue
                 extracted.add(path)
-    except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
-        return extracted, rejected
-    return extracted, rejected
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+        report_rejection(f"sprite atlas is corrupt, {len(extracted)} sprite(s) already extracted: {exc}")
+    return extracted
 
 
 def _valid_manifest_paths(
     manifest: SourceManifest,
     dest: Path,
     report_rejection: Callable[[str], None],
-) -> set[str]:
+) -> tuple[set[str], set[str]]:
+    """Classify every manifest sprite path against disk, once: already valid, or rejected outright.
+
+    A rejected path is reported here and must never reach `_extract_sprite_regions`, which would otherwise reprocess it and report the same escape a second time.
+    """
     valid: set[str] = set()
+    rejected: set[str] = set()
     for path in manifest.sprites:
         try:
             target = confined_asset_path(dest, path)
         except AssetPathEscapesDestination:
             report_rejection(f"rejected sprite region path escaping destination: {path}")
+            rejected.add(path)
             continue
         if is_valid_local_resource(target):
             valid.add(path)
-    return valid
+    return valid, rejected
 
 
 def _manifest_metadata(result: CharacterResult) -> dict[str, object]:
