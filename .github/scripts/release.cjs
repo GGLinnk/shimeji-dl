@@ -1,9 +1,22 @@
 const fs = require('fs');
 const path = require('path');
 
-function fail(core, message) {
-  core.setFailed(message);
-  throw new Error(message);
+class ReleaseFailure extends Error {}
+
+function fail(message) {
+  throw new ReleaseFailure(message);
+}
+
+async function guarded(core, action) {
+  try {
+    await action();
+  } catch (error) {
+    if (error instanceof ReleaseFailure) {
+      core.setFailed(error.message);
+      return;
+    }
+    throw error;
+  }
 }
 
 async function getMainSha(github, context) {
@@ -12,7 +25,7 @@ async function getMainSha(github, context) {
   return response.data.object.sha;
 }
 
-async function assertTagAbsent(github, context, core, tag) {
+async function assertTagAbsent(github, context, tag) {
   const { owner, repo } = context.repo;
   try {
     await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
@@ -20,10 +33,10 @@ async function assertTagAbsent(github, context, core, tag) {
     if (error.status === 404) return;
     throw error;
   }
-  fail(core, `Tag ${tag} already exists`);
+  fail(`Tag ${tag} already exists`);
 }
 
-async function assertTaggedCommitBelongsToMain(github, context, core, sha) {
+async function assertTaggedCommitBelongsToMain(github, context, sha) {
   const { owner, repo } = context.repo;
   const response = await github.rest.repos.compareCommitsWithBasehead({
     owner,
@@ -31,11 +44,14 @@ async function assertTaggedCommitBelongsToMain(github, context, core, sha) {
     basehead: `${sha}...main`,
   });
   if (!['ahead', 'identical'].includes(response.data.status)) {
-    fail(core, `Tagged commit ${sha} is not an ancestor of main`);
+    fail(`Tagged commit ${sha} is not an ancestor of main`);
   }
 }
 
-async function findQualifiedRun(github, context, core, sha) {
+async function findQualifiedRun(github, context, sha) {
+  const prefix = process.env.DIST_ARTIFACT_PREFIX;
+  if (!prefix) fail('DIST_ARTIFACT_PREFIX is missing');
+
   const { owner, repo } = context.repo;
   const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
     owner,
@@ -56,10 +72,10 @@ async function findQualifiedRun(github, context, core, sha) {
       candidate.conclusion === 'success',
   );
   if (!run) {
-    fail(core, `No successful push/main CI run found for ${sha}`);
+    fail(`No successful push/main CI run found for ${sha}`);
   }
 
-  const artifactName = `dist-${sha}`;
+  const artifactName = `${prefix}-${sha}`;
   const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
     owner,
     repo,
@@ -70,58 +86,62 @@ async function findQualifiedRun(github, context, core, sha) {
     (candidate) => candidate.name === artifactName && !candidate.expired,
   );
   if (!artifact) {
-    fail(core, `CI run ${run.id} has no non-expired ${artifactName} artifact`);
+    fail(`CI run ${run.id} has no non-expired ${artifactName} artifact`);
   }
 
   return { run, artifact, artifactName };
 }
 
 async function qualify({ github, context, core }) {
-  const mode = process.env.RELEASE_MODE;
-  const tag = process.env.RELEASE_TAG;
-  const sha = context.sha;
+  await guarded(core, async () => {
+    const mode = process.env.RELEASE_MODE;
+    const tag = process.env.RELEASE_TAG;
+    const sha = context.sha;
 
-  if (!mode || !tag) fail(core, 'Release mode/tag are missing');
+    if (!mode || !tag) fail('Release mode/tag are missing');
 
-  if (mode === 'prepare') {
-    const mainSha = await getMainSha(github, context);
-    if (sha !== mainSha) {
-      fail(core, `Manual release SHA ${sha} is not current main ${mainSha}`);
+    if (mode === 'prepare') {
+      const mainSha = await getMainSha(github, context);
+      if (sha !== mainSha) {
+        fail(`Manual release SHA ${sha} is not current main ${mainSha}`);
+      }
+      await assertTagAbsent(github, context, tag);
+    } else if (mode === 'publish') {
+      await assertTaggedCommitBelongsToMain(github, context, sha);
+    } else {
+      fail(`Unsupported release mode: ${mode}`);
     }
-    await assertTagAbsent(github, context, core, tag);
-  } else if (mode === 'publish') {
-    await assertTaggedCommitBelongsToMain(github, context, core, sha);
-  } else {
-    fail(core, `Unsupported release mode: ${mode}`);
-  }
 
-  const { run, artifact, artifactName } = await findQualifiedRun(github, context, core, sha);
-  core.info(`Qualified CI run ${run.id}, artifact ${artifact.id} (${artifactName})`);
-  core.setOutput('run-id', String(run.id));
-  core.setOutput('artifact-name', artifactName);
+    const { run, artifact, artifactName } = await findQualifiedRun(github, context, sha);
+    core.info(`Qualified CI run ${run.id}, artifact ${artifact.id} (${artifactName})`);
+    core.setOutput('run-id', String(run.id));
+    core.setOutput('artifact-name', artifactName);
+  });
 }
 
 async function createTagAndDispatch({ github, context, core }) {
-  const tag = process.env.RELEASE_TAG;
-  if (!tag) fail(core, 'RELEASE_TAG is missing');
+  await guarded(core, async () => {
+    const tag = process.env.RELEASE_TAG;
+    if (!tag) fail('RELEASE_TAG is missing');
 
-  const { owner, repo } = context.repo;
-  await assertTagAbsent(github, context, core, tag);
-  await github.rest.git.createRef({
-    owner,
-    repo,
-    ref: `refs/tags/${tag}`,
-    sha: context.sha,
-  });
-  core.info(`Created ${tag} at ${context.sha}`);
+    const { owner, repo } = context.repo;
+    await assertTagAbsent(github, context, tag);
+    await github.rest.git.createRef({
+      owner,
+      repo,
+      ref: `refs/tags/${tag}`,
+      sha: context.sha,
+    });
+    core.info(`Created ${tag} at ${context.sha}`);
 
-  await github.rest.actions.createWorkflowDispatch({
-    owner,
-    repo,
-    workflow_id: 'publish.yml',
-    ref: tag,
+    await github.rest.actions.createWorkflowDispatch({
+      owner,
+      repo,
+      workflow_id: 'publish.yml',
+      ref: tag,
+    });
+    core.info(`Dispatched publish.yml on ${tag}`);
   });
-  core.info(`Dispatched publish.yml on ${tag}`);
 }
 
 async function findOrCreateRelease(github, context, tag) {
@@ -147,46 +167,49 @@ async function findOrCreateRelease(github, context, tag) {
 }
 
 async function createRelease({ github, context, core }) {
-  const tag = process.env.RELEASE_TAG;
-  if (!tag) fail(core, 'RELEASE_TAG is missing');
+  await guarded(core, async () => {
+    const tag = process.env.RELEASE_TAG;
+    if (!tag) fail('RELEASE_TAG is missing');
 
-  const { owner, repo } = context.repo;
-  const release = await findOrCreateRelease(github, context, tag);
-  const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
-    owner,
-    repo,
-    release_id: release.id,
-    per_page: 100,
-  });
-  const existing = new Set(assets.map((asset) => asset.name));
-  const files = fs
-    .readdirSync('dist', { withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => path.join('dist', entry.name))
-    .sort();
+    const files = fs
+      .readdirSync('dist', { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => path.join('dist', entry.name))
+      .sort();
 
-  if (files.length === 0) fail(core, 'No distribution files found in dist/');
+    if (files.length === 0) fail('No distribution files found in dist/');
 
-  for (const file of files) {
-    const name = path.basename(file);
-    if (existing.has(name)) {
-      core.info(`Release asset already exists: ${name}`);
-      continue;
-    }
-    const data = fs.readFileSync(file);
-    await github.rest.repos.uploadReleaseAsset({
+    const { owner, repo } = context.repo;
+    const release = await findOrCreateRelease(github, context, tag);
+    const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
       owner,
       repo,
       release_id: release.id,
-      name,
-      data,
-      headers: {
-        'content-type': 'application/octet-stream',
-        'content-length': data.length,
-      },
+      per_page: 100,
     });
-    core.info(`Uploaded release asset: ${name}`);
-  }
+    const existing = new Set(assets.map((asset) => asset.name));
+
+    for (const file of files) {
+      const name = path.basename(file);
+      if (existing.has(name)) {
+        core.info(`Release asset already exists: ${name}`);
+        continue;
+      }
+      const data = fs.readFileSync(file);
+      await github.rest.repos.uploadReleaseAsset({
+        owner,
+        repo,
+        release_id: release.id,
+        name,
+        data,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'content-length': data.length,
+        },
+      });
+      core.info(`Uploaded release asset: ${name}`);
+    }
+  });
 }
 
 module.exports = {

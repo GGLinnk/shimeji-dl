@@ -2,35 +2,31 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
+from typing import NoReturn
 
-import tomllib
+from packaging.version import InvalidVersion, Version
+from project_version import read_project_version
 
 
-def _fail(message: str) -> None:
-    print(f"::error::{message}", file=sys.stderr)
+def _fail(message: str) -> NoReturn:
+    on_actions_runner = os.environ.get("GITHUB_ACTIONS") == "true"
+    print(f"::error::{message}" if on_actions_runner else message, file=sys.stderr)
     raise SystemExit(1)
-
-
-def _project_version() -> str:
-    with Path("pyproject.toml").open("rb") as handle:
-        data = tomllib.load(handle)
-    version = data.get("project", {}).get("version")
-    if not isinstance(version, str) or not version.strip():
-        _fail("pyproject.toml does not define a valid project.version")
-    return version.strip()
 
 
 def _write_output(name: str, value: str) -> None:
     output = os.environ.get("GITHUB_OUTPUT")
     if not output:
         _fail("GITHUB_OUTPUT is not available")
-    with Path(output).open("a", encoding="utf-8") as handle:
+    with open(output, "a", encoding="utf-8") as handle:
         handle.write(f"{name}={value}\n")
 
 
 def main() -> None:
-    version = _project_version()
+    try:
+        version = read_project_version()
+    except ValueError as exc:
+        _fail(str(exc))
     tag = f"v{version}"
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     ref_type = os.environ.get("GITHUB_REF_TYPE", "")
@@ -41,8 +37,14 @@ def main() -> None:
             _fail("Manual releases must be started from the main branch")
         mode = "prepare"
     elif ref_type == "tag":
-        if ref_name != tag:
+        try:
+            tag_version = Version(ref_name.removeprefix("v"))
+        except InvalidVersion:
+            _fail(f"Tag {ref_name!r} is not a valid version")
+        if tag_version != Version(version):
             _fail(f"Tag {ref_name!r} does not match pyproject version {tag!r}")
+        if ref_name != tag:
+            _fail(f"Tag {ref_name!r} does not match the required form {tag!r}")
         mode = "publish"
     else:
         _fail(f"Unsupported release ref type: {ref_type!r}")

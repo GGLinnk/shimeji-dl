@@ -3,15 +3,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import tomllib
+from project_version import ROOT, read_project_version
 
-ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / "dist"
-
-
-def project_version() -> str:
-    with (ROOT / "pyproject.toml").open("rb") as handle:
-        return str(tomllib.load(handle)["project"]["version"])
 
 
 def only(pattern: str) -> Path:
@@ -45,7 +39,7 @@ def smoke(package: Path, expected_version: str) -> None:
 
 
 def main() -> None:
-    version = project_version()
+    version = read_project_version()
     smoke(only("*.whl"), version)
     smoke(only("*.tar.gz"), version)
 
