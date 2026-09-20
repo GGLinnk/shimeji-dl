@@ -4,7 +4,7 @@ An asynchronous downloader that turns remote Shimeji sources into packages ready
 
 ## Features
 
-- Pluggable adapters and optional manifests.
+- Multiple sources and exact package inventories.
 - XML and adaptive asset discovery.
 - Sprite-atlas, image, and audio handling.
 - Native layout and persistent local reuse.
@@ -105,33 +105,41 @@ The generic downloader only talks to protocols (`SourceAdapter`, optional `Manif
 Adding another site does not require modifying the probing engine or download core.
 A source can optionally expose an authoritative manifest and sprite atlas without making that capability mandatory for other adapters.
 
-## Discovery and fallback strategy
+## How assets are found
 
-1. **Use a Source Manifest When Available**  
-The `shimejis.xyz` adapter reads `/api/shimeji/<slug>/configuration`, including the exact XML, sprite map, spritesheet URL, and public metadata.
-2. **Materialize the Sprite Atlas**  
-The generic engine safely crops manifest regions into the individual PNG files expected by Shimeji-ee, VShimeji, and compatible alternatives.
-3. **Fetch Configuration Fallbacks**  
-Fetch `actions.xml`, `behaviors.xml`, and optional `info.xml` from traditional source URLs when no manifest supplies them.
-4. **Parse XML**  
-Parse configuration with `lxml` and discover referenced images, preview/splash images, and sounds.
-5. **Download Remaining References**  
-Download XML-referenced resources not supplied by the atlas, placing sounds under the character's `sound/` directory.
-6. **Classify Source Omissions**  
-A manifest-backed source distinguishes assets absent from its public package from retryable transfer failures.
-7. **Keep Probing Available**  
-The original adaptive numeric strategy remains the generic fallback for sources without an authoritative manifest or whenever manifest retrieval fails.  
-Explicit `--probe deep` also probes beyond an authoritative manifest.
-8. **Gallop, Bisect, and Explore Quiescence**  
-The fallback prober expands successful ranges, narrows the frontier, and searches sparse tails without a fixed index ceiling.
-9. **Avoid Sound Guessing**  
+1. **Read the Source Manifest When Available**  
+Use the exact configuration, metadata, and asset inventory whenever the source provides a manifest.
+2. **Extract Sprite Atlases**  
+Split source-provided sprite atlases into the individual PNG files expected by Shimeji-ee, VShimeji, and compatible alternatives.
+3. **Look for Standard Configuration Files**  
+Fetch `actions.xml`, `behaviors.xml`, and optional `info.xml` directly when the manifest does not supply them.
+4. **Follow Configuration References**  
+Find the images, preview images, splash images, and sounds named by the configuration.
+5. **Download Remaining Files**  
+Download referenced resources not supplied by the sprite atlas, placing sounds under the character's `sound/` directory.
+6. **Report Missing Source Files**  
+Distinguish assets absent from the published package from temporary download failures.
+7. **Fall Back to Adaptive Discovery**  
+Use adaptive numeric discovery when a manifest is unavailable or cannot be loaded.  
+Explicit `--probe deep` also searches beyond the published inventory.
+8. **Continue Around Successful Ranges**  
+Search around discovered image numbers and across occasional gaps without imposing a fixed upper limit.
+9. **Download Only Referenced Sounds**  
 Download sounds only when configuration references them; audio filenames are never numerically probed.
-10. **Preserve Strict Semantics**  
+10. **Honor Strict Mode**  
 Source omissions still make a package incomplete under `--strict`, but they are not retried indefinitely.
 
 `--probe auto` is the default.  
 `--probe deep` widens sparse-tail exploration.  
 `--probe off` disables numeric probing entirely.
+
+## shimejis.xyz support
+
+- Accepts slugs, character URLs, pack URLs, and directory targets.
+- Reads `/api/shimeji/<slug>/configuration` for the exact package inventory.
+- Uses published configuration, metadata, sprite maps, and spritesheets.
+- Falls back to the legacy sprite CDN layout.
+- Identifies assets omitted from the public source package.
 
 ## Dependencies
 
@@ -143,6 +151,8 @@ Each runtime dependency replaces a concrete piece of infrastructure rather than 
 - `Pillow` - Safe extraction of individual PNG files from source-provided sprite atlases.
 - `rich` - Concurrent terminal progress, wrapping output and interactive confirmations.
 - `typer` - CLI declaration, validation, help and option parsing.
+- `pathvalidate` - Cross-platform validation of a downloaded asset's path.
+- `msgspec` - Bounded, per-field validation of a source's manifest payload.
 
 ## Useful options
 
