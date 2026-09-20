@@ -85,22 +85,25 @@ Downloading the entire `shimejis.xyz` directory requires confirmation unless `--
 
 ## Archiving
 
-`--archive` is a post-download step: it never changes what is downloaded, only whether the result is also zipped.  
-Its granularity follows the target on the command line: one archive per character, one per pack or collection, one for the whole site, each named after that target and written inside the output root.  
-A collection archive is named by its pack slug (`<identifier>-shimeji-pack.zip`), whatever form the target took: pack slug, pack URL, or display name.  
-Passing several targets in one invocation produces one archive per target.
+Archiving zips what was downloaded, inside the download folder.  
+Each target gets its own archive, named after that target: a pack gives `undertale-shimeji-pack.zip`, a character gives `<character>.zip`, the whole site gives `shimejis.xyz.zip`.
+
+It happens either at the end of a download, with `--archive`, or later from what is already on disk, with the `archive` command, which never goes online.  
+With no target, the `archive` command zips everything.
+
+An existing archive is replaced only after confirmation, or automatically with the blanket acceptance option, `-y`/`--yes`.
+
+| Target | What is archived |
+| --- | --- |
+| A character name or link | That character |
+| A pack link, or its name ending with `-shimeji-pack` | That pack |
+| The pack's display name, exactly as shown on the site (for example `Undertale`) | That pack |
+| The site | Everything from that site |
+| Nothing (`archive` command only) | Everything in the output folder |
 
 ```bash
 uv run shimeji-dl https://shimejis.xyz/directory/undertale-shimeji-pack --archive
 ```
-
-`shimeji-dl archive` builds an archive from what is already on disk, without any network access.  
-It accepts the same target forms as `download`: a character identifier, a collection's pack slug or display name, or a URL reduced to its local form.  
-A lowercase bare identifier always names a character.  
-A mixed-case identifier-shaped one tries a collection's exact display name first, then falls back to the character its lowercase form names.  
-Any other bare text names only a collection's exact display name, with no character fallback.  
-A collection is otherwise reached only through its pack slug, its pack URL, or that exact display name.  
-With no target, it archives the whole output root; it is the only command that produces that unnamed, global archive.
 
 ```bash
 uv run shimeji-dl archive
@@ -110,11 +113,12 @@ uv run shimeji-dl archive undertale-shimeji-pack
 Every archive is rooted at `img/`, so extracting it directly at a Shimeji-ee, VShimeji, or compatible installation root reproduces the native layout.
 
 `download` stays the implicit default command, so an existing invocation keeps working unnamed.  
-A target named exactly like a command (`download` or `archive`) is read as that command; name `download` explicitly to reach a character or collection sharing that name.
+A target named exactly `download` or `archive` needs the explicit form to reach a character or collection sharing that name.
 
 | `archive` option | Description |
 | --- | --- |
 | `-o, --output PATH` | Set the Shimeji installation or download root to archive from. |
+| `-y, --yes` | Accept confirmation prompts automatically. |
 | `-v, --verbose` | Show matched-character details when resolving a collection. |
 | `-q, --quiet` | Suppress progress output. |
 
