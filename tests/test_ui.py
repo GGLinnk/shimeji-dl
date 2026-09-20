@@ -262,3 +262,75 @@ def test_archive_progress_bar_is_created_and_torn_down_when_not_quiet() -> None:
     reporter.archive_finished(Path("shimeji-downloads") / "undertale.zip", 3, 2048)
 
     assert reporter._archive_progress is None
+
+
+def test_can_confirm_reflects_whether_stdin_is_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    reporter = RichReporter()
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert reporter.can_confirm() is False
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    assert reporter.can_confirm() is True
+
+
+def test_confirm_never_prompts_when_it_cannot_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`confirm` defers to `can_confirm`: no interactive terminal means no prompt is shown, just a refusal."""
+    reporter = RichReporter()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    def _fail_if_asked(*args: object, **kwargs: object) -> bool:
+        raise AssertionError("confirm must not prompt when can_confirm() is False")
+
+    monkeypatch.setattr("shimeji_dl.ui.rich.Confirm.ask", _fail_if_asked)
+
+    assert reporter.confirm("Replace it?") is False
+
+
+def test_confirm_escapes_markup_in_the_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A validated archive name can carry a bracket segment; the question must show it verbatim, not as markup."""
+    from rich.text import Text
+
+    reporter = RichReporter()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    captured: dict[str, str] = {}
+
+    def _capture(prompt: str, *, default: bool = False, console: object = None) -> bool:
+        captured["prompt"] = prompt
+        return True
+
+    monkeypatch.setattr("shimeji_dl.ui.rich.Confirm.ask", _capture)
+
+    message = "Archive already exists: shimeji-downloads/a[b]-shimeji-pack.zip. Replace it?"
+    reporter.confirm(message)
+
+    assert Text.from_markup(captured["prompt"]).plain == message
+
+
+def test_can_confirm_is_false_when_stdin_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed file descriptor 0 (`<&-`) leaves `sys.stdin` as `None`: never an AttributeError."""
+    reporter = RichReporter()
+    monkeypatch.setattr("sys.stdin", None)
+
+    assert reporter.can_confirm() is False
+
+
+def test_can_confirm_is_false_when_isatty_itself_raises_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    reporter = RichReporter()
+
+    def _raise() -> bool:
+        raise OSError("bad file descriptor")
+
+    monkeypatch.setattr("sys.stdin.isatty", _raise)
+
+    assert reporter.can_confirm() is False
+
+
+def test_can_confirm_is_false_when_stdin_is_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A closed stream's `isatty()` raises `ValueError`, not `OSError`: checked before ever calling it."""
+    reporter = RichReporter()
+    closed_stream = StringIO()
+    closed_stream.close()
+    monkeypatch.setattr("sys.stdin", closed_stream)
+
+    assert reporter.can_confirm() is False
